@@ -7,16 +7,19 @@ from .helpers import SeededTest, select_by_precision
 from ..vartypes import continuous_types
 from ..model import Model, Point, Potential, Deterministic
 from ..blocking import DictToVarBijection, DictToArrayBijection, ArrayOrdering
-from ..distributions import (DensityDist, Categorical, Multinomial, VonMises, Dirichlet,
-                             MvStudentT, MvNormal, MatrixNormal, ZeroInflatedPoisson,
-                             ZeroInflatedNegativeBinomial, Constant, Poisson, Bernoulli, Beta,
-                             BetaBinomial, HalfStudentT, StudentT, Weibull, Pareto,
-                             InverseGamma, Gamma, Cauchy, HalfCauchy, Lognormal, Laplace,
-                             NegativeBinomial, Geometric, Exponential, ExGaussian, Normal,
-                             Flat, LKJCorr, Wald, ChiSquared, HalfNormal, DiscreteUniform,
-                             Bound, Uniform, Triangular, Binomial, SkewNormal, DiscreteWeibull,
-                             Gumbel, Logistic, OrderedLogistic, LogitNormal, Interpolated,
-                             ZeroInflatedBinomial, HalfFlat, AR1, KroneckerNormal)
+from ..distributions import (
+    DensityDist, Categorical, Multinomial, VonMises, Dirichlet,
+    MvStudentT, MvNormal, MatrixNormal, ZeroInflatedPoisson,
+    ZeroInflatedNegativeBinomial, Constant, Poisson, Bernoulli, Beta,
+    BetaBinomial, HalfStudentT, StudentT, Weibull, Pareto,
+    InverseGamma, Gamma, Cauchy, HalfCauchy, Lognormal, Laplace,
+    NegativeBinomial, Geometric, Exponential, ExGaussian, Normal, TruncatedNormal,
+    Flat, LKJCorr, Wald, ChiSquared, HalfNormal, DiscreteUniform,
+    Bound, Uniform, Triangular, Binomial, SkewNormal, DiscreteWeibull,
+    Gumbel, Logistic, OrderedLogistic, LogitNormal, Interpolated,
+    ZeroInflatedBinomial, HalfFlat, AR1, KroneckerNormal, Rice,
+    Kumaraswamy
+)
 
 from ..distributions import continuous
 from pymc3.theanof import floatX
@@ -219,6 +222,14 @@ def SortedVector(n):
     np.random.seed(42)
     for _ in range(10):
         vals.append(np.sort(np.random.randn(n)))
+    return Domain(vals, edges=(None, None))
+
+
+def UnitSortedVector(n):
+    vals = []
+    np.random.seed(42)
+    for _ in range(10):
+        vals.append(np.sort(np.random.rand(n)))
     return Domain(vals, edges=(None, None))
 
 
@@ -436,6 +447,19 @@ class TestMatchesScipy(SeededTest):
                 decimal = select_by_precision(float64=6, float32=3)
             assert_almost_equal(logp(pt), logp_reference(pt), decimal=decimal, err_msg=str(pt))
 
+    def check_logcdf(self, pymc3_dist, domain, paramdomains, scipy_logcdf, decimal=None):
+        domains = paramdomains.copy()
+        domains['value'] = domain
+        if decimal is None:
+            decimal = select_by_precision(float64=6, float32=3)
+        for pt in product(domains, n_samples=100):
+            params = dict(pt)
+            scipy_cdf = scipy_logcdf(**params)
+            value = params.pop('value')
+            dist = pymc3_dist.dist(**params)
+            assert_almost_equal(dist.logcdf(value).tag.test_value, scipy_cdf,
+                                decimal=decimal, err_msg=str(pt))
+
     def check_int_to_1(self, model, value, domain, paramdomains):
         pdf = model.fastfn(exp(model.logpt))
         for pt in product(paramdomains, n_samples=10):
@@ -487,11 +511,15 @@ class TestMatchesScipy(SeededTest):
         self.pymc3_matches_scipy(
             Uniform, Runif, {'lower': -Rplusunif, 'upper': Rplusunif},
             lambda value, lower, upper: sp.uniform.logpdf(value, lower, upper - lower))
+        self.check_logcdf(Uniform, Runif, {'lower': -Rplusunif, 'upper': Rplusunif},
+                          lambda value, lower, upper: sp.uniform.logcdf(value, lower, upper - lower))
 
     def test_triangular(self):
         self.pymc3_matches_scipy(
             Triangular, Runif, {'lower': -Rplusunif, 'c': Runif, 'upper': Rplusunif},
             lambda value, c, lower, upper: sp.triang.logpdf(value, c-lower, lower, upper-lower))
+        self.check_logcdf(Triangular, Runif, {'lower': -Rplusunif, 'c': Runif, 'upper': Rplusunif},
+                          lambda value, c, lower, upper: sp.triang.logcdf(value, c-lower, lower, upper-lower))
 
     def test_bound_normal(self):
         PositiveNormal = Bound(Normal, lower=0.)
@@ -511,6 +539,10 @@ class TestMatchesScipy(SeededTest):
         with Model():
             x = Flat('a')
             assert_allclose(x.tag.test_value, 0)
+        self.check_logcdf(Flat, Runif, {}, lambda value: np.log(0.5))
+        # Check infinite cases individually.
+        assert 0. == Flat.dist().logcdf(np.inf).tag.test_value
+        assert -np.inf == Flat.dist().logcdf(-np.inf).tag.test_value
 
     def test_half_flat(self):
         self.pymc3_matches_scipy(HalfFlat, Rplus, {}, lambda value: 0)
@@ -518,28 +550,56 @@ class TestMatchesScipy(SeededTest):
             x = HalfFlat('a', shape=2)
             assert_allclose(x.tag.test_value, 1)
             assert x.tag.test_value.shape == (2,)
+        self.check_logcdf(HalfFlat, Runif, {}, lambda value: -np.inf)
+        # Check infinite cases individually.
+        assert 0. == HalfFlat.dist().logcdf(np.inf).tag.test_value
+        assert -np.inf == HalfFlat.dist().logcdf(-np.inf).tag.test_value
 
     def test_normal(self):
         self.pymc3_matches_scipy(Normal, R, {'mu': R, 'sd': Rplus},
                                  lambda value, mu, sd: sp.norm.logpdf(value, mu, sd),
                                  decimal=select_by_precision(float64=6, float32=1)
                                  )
+        self.check_logcdf(Normal, R, {'mu': R, 'sd': Rplus},
+                          lambda value, mu, sd: sp.norm.logcdf(value, mu, sd))
+
+    def test_truncated_normal(self):
+        def scipy_logp(value, mu, sd, lower, upper):
+            return sp.truncnorm.logpdf(
+                value, (lower-mu)/sd, (upper-mu)/sd, loc=mu, scale=sd)
+
+        args = {'mu': array(-2.1), 'lower': array(-100.), 'upper': array(0.01),
+                'sd': array(0.01)}
+        val = TruncatedNormal.dist(**args).logp(0.)
+        assert_allclose(val.eval(), scipy_logp(value=0, **args))
+
+        self.pymc3_matches_scipy(
+            TruncatedNormal, R,
+            {'mu': R, 'sd': Rplusbig, 'lower': -Rplusbig, 'upper': Rplusbig},
+            scipy_logp,
+            decimal=select_by_precision(float64=6, float32=1)
+        )
 
     def test_half_normal(self):
         self.pymc3_matches_scipy(HalfNormal, Rplus, {'sd': Rplus},
                                  lambda value, sd: sp.halfnorm.logpdf(value, scale=sd),
                                  decimal=select_by_precision(float64=6, float32=-1)
                                  )
+        self.check_logcdf(HalfNormal, Rplus, {'sd': Rplus},
+                          lambda value, sd: sp.halfnorm.logcdf(value, scale=sd))
 
     def test_chi_squared(self):
         self.pymc3_matches_scipy(ChiSquared, Rplus, {'nu': Rplusdunif},
                                  lambda value, nu: sp.chi2.logpdf(value, df=nu))
 
+    @pytest.mark.xfail(reason="Poor CDF in SciPy. See scipy/scipy#869 for details.")
     def test_wald_scipy(self):
-        self.pymc3_matches_scipy(Wald, Rplus, {'mu': Rplus},
-                                 lambda value, mu: sp.invgauss.logpdf(value, mu),
+        self.pymc3_matches_scipy(Wald, Rplus, {'mu': Rplus, 'alpha': Rplus},
+                                 lambda value, mu, alpha: sp.invgauss.logpdf(value, mu=mu, loc=alpha),
                                  decimal=select_by_precision(float64=6, float32=1)
                                  )
+        self.check_logcdf(Wald, Rplus, {'mu': Rplus, 'alpha': Rplus},
+                          lambda value, mu, alpha: sp.invgauss.logcdf(value, mu=mu, loc=alpha))
 
     @pytest.mark.parametrize('value,mu,lam,phi,alpha,logp', [
         (.5, .001, .5, None, 0., -124500.7257914),
@@ -571,10 +631,20 @@ class TestMatchesScipy(SeededTest):
         self.pymc3_matches_scipy(Beta, Unit, {'alpha': Rplus, 'beta': Rplus},
                                  lambda value, alpha, beta: sp.beta.logpdf(value, alpha, beta))
         self.pymc3_matches_scipy(Beta, Unit, {'mu': Unit, 'sd': Rplus}, beta_mu_sd)
+        self.check_logcdf(Beta, Unit, {'alpha': Rplus, 'beta': Rplus},
+                                lambda value, alpha, beta: sp.beta.logcdf(value, alpha, beta))
+
+    def test_kumaraswamy(self):
+        # Scipy does not have a built-in Kumaraswamy pdf
+        def scipy_log_pdf(value, a, b):
+            return np.log(a) + np.log(b) + (a - 1) * np.log(value) + (b - 1) * np.log(1 - value ** a)
+        self.pymc3_matches_scipy(Kumaraswamy, Unit, {'a': Rplus, 'b': Rplus}, scipy_log_pdf)
 
     def test_exponential(self):
         self.pymc3_matches_scipy(Exponential, Rplus, {'lam': Rplus},
                                  lambda value, lam: sp.expon.logpdf(value, 0, 1 / lam))
+        self.check_logcdf(Exponential, Rplus, {'lam': Rplus},
+                          lambda value, lam: sp.expon.logcdf(value, 0, 1 / lam))
 
     def test_geometric(self):
         self.pymc3_matches_scipy(Geometric, Nat, {'p': Unit},
@@ -589,23 +659,33 @@ class TestMatchesScipy(SeededTest):
     def test_laplace(self):
         self.pymc3_matches_scipy(Laplace, R, {'mu': R, 'b': Rplus},
                                  lambda value, mu, b: sp.laplace.logpdf(value, mu, b))
+        self.check_logcdf(Laplace, R, {'mu': R, 'b': Rplus},
+                          lambda value, mu, b: sp.laplace.logcdf(value, mu, b))
 
     def test_lognormal(self):
         self.pymc3_matches_scipy(
             Lognormal, Rplus, {'mu': R, 'tau': Rplusbig},
             lambda value, mu, tau: floatX(sp.lognorm.logpdf(value, tau**-.5, 0, np.exp(mu))))
+        self.check_logcdf(Lognormal, Rplus, {'mu': R, 'tau': Rplusbig},
+                          lambda value, mu, tau: sp.lognorm.logcdf(value, tau**-.5, 0, np.exp(mu)))
 
     def test_t(self):
         self.pymc3_matches_scipy(StudentT, R, {'nu': Rplus, 'mu': R, 'lam': Rplus},
                                  lambda value, nu, mu, lam: sp.t.logpdf(value, nu, mu, lam**-0.5))
+        self.check_logcdf(StudentT, R, {'nu': Rplus, 'mu': R, 'lam': Rplus},
+                          lambda value, nu, mu, lam: sp.t.logcdf(value, nu, mu, lam**-0.5))
 
     def test_cauchy(self):
         self.pymc3_matches_scipy(Cauchy, R, {'alpha': R, 'beta': Rplusbig},
                                  lambda value, alpha, beta: sp.cauchy.logpdf(value, alpha, beta))
+        self.check_logcdf(Cauchy, R, {'alpha': R, 'beta': Rplusbig},
+                          lambda value, alpha, beta: sp.cauchy.logcdf(value, alpha, beta))
 
     def test_half_cauchy(self):
         self.pymc3_matches_scipy(HalfCauchy, Rplus, {'beta': Rplusbig},
                                  lambda value, beta: sp.halfcauchy.logpdf(value, scale=beta))
+        self.check_logcdf(HalfCauchy, Rplus, {'beta': Rplusbig},
+                          lambda value, beta: sp.halfcauchy.logcdf(value, scale=beta))
 
     def test_gamma(self):
         self.pymc3_matches_scipy(
@@ -622,15 +702,29 @@ class TestMatchesScipy(SeededTest):
             InverseGamma, Rplus, {'alpha': Rplus, 'beta': Rplus},
             lambda value, alpha, beta: sp.invgamma.logpdf(value, alpha, scale=beta))
 
+    @pytest.mark.xfail(condition=(theano.config.floatX == "float32"),
+                           reason="Fails on float32 due to scaling issues")
+    def test_inverse_gamma_alt_params(self):
+        def test_fun(value, mu, sd):
+            alpha, beta = InverseGamma._get_alpha_beta(None, None, mu, sd)
+            return sp.invgamma.logpdf(value, alpha, scale=beta)
+        self.pymc3_matches_scipy(
+            InverseGamma, Rplus, {'mu': Rplus, 'sd': Rplus}, test_fun)
+
     def test_pareto(self):
         self.pymc3_matches_scipy(Pareto, Rplus, {'alpha': Rplusbig, 'm': Rplusbig},
                                  lambda value, alpha, m: sp.pareto.logpdf(value, alpha, scale=m))
+        self.check_logcdf(Pareto, Rplus, {'alpha': Rplusbig, 'm': Rplusbig},
+                          lambda value, alpha, m: sp.pareto.logcdf(value, alpha, scale=m))
 
     @pytest.mark.xfail(condition=(theano.config.floatX == "float32"), reason="Fails on float32 due to inf issues")
     def test_weibull(self):
         self.pymc3_matches_scipy(Weibull, Rplus, {'alpha': Rplusbig, 'beta': Rplusbig},
                                  lambda value, alpha, beta: sp.exponweib.logpdf(value, 1, alpha, scale=beta),
                                  )
+        self.check_logcdf(Weibull, Rplus, {'alpha': Rplusbig, 'beta': Rplusbig},
+                          lambda value, alpha, beta:
+                          sp.exponweib.logcdf(value, 1, alpha, scale=beta),)
 
     def test_half_studentt(self):
         # this is only testing for nu=1 (halfcauchy)
@@ -900,11 +994,11 @@ class TestMatchesScipy(SeededTest):
         [[[.25, .25, .25, .25],
          [.25, .25, .25, .25]], (2, 4), 13],
         [[[.25, .25, .25, .25],
-         [.25, .25, .25, .25]], (2, 4), [17, 19]],
-        [[[.25, .25, .25, .25],
          [.25, .25, .25, .25]], (1, 2, 4), [23, 29]],
         [[[.25, .25, .25, .25],
          [.25, .25, .25, .25]], (10, 2, 4), [31, 37]],
+        [[[.25, .25, .25, .25],
+         [.25, .25, .25, .25]], (2, 4), [17, 19]],
     ])
     def test_multinomial_random(self, p, shape, n):
         p = np.asarray(p)
@@ -1030,6 +1124,25 @@ class TestMatchesScipy(SeededTest):
         pt = {'eg': value}
         assert_almost_equal(model.fastlogp(pt), logp, decimal=select_by_precision(float64=6, float32=2), err_msg=str(pt))
 
+    @pytest.mark.parametrize('value,mu,sigma,nu,logcdf', [
+        (0.5, -50.000, 0.500, 0.500, 0.0000000),
+        (1.0, -1.000, 0.001, 0.001, 0.0000000),
+        (2.0, 0.001, 1.000, 1.000, -0.2365674),
+        (5.0, 0.500, 2.500, 2.500, -0.2886489),
+        (7.5, 2.000, 5.000, 5.000, -0.5655104),
+        (15.0, 5.000, 7.500, 7.500, -0.4545255),
+        (50.0, 50.000, 10.000, 10.000, -1.433714),
+        (1000.0, 500.000, 10.000, 20.000, -1.573708e-11),
+    ])
+    def test_ex_gaussian_cdf(self, value, mu, sigma, nu, logcdf):
+        """Log probabilities calculated using the pexGAUS function from the R package gamlss.
+        See e.g., doi: 10.1111/j.1467-9876.2005.00510.x, or http://www.gamlss.org/."""
+        assert_almost_equal(
+            ExGaussian.dist(mu=mu, sigma=sigma, nu=nu).logcdf(value).tag.test_value,
+            logcdf,
+            decimal=select_by_precision(float64=6, float32=2),
+            err_msg=str((value, mu, sigma, nu, logcdf)))
+
     @pytest.mark.xfail(condition=(theano.config.floatX == "float32"), reason="Fails on float32")
     def test_vonmises(self):
         self.pymc3_matches_scipy(
@@ -1041,10 +1154,17 @@ class TestMatchesScipy(SeededTest):
             return floatX(sp.gumbel_r.logpdf(value, loc=mu, scale=beta))
         self.pymc3_matches_scipy(Gumbel, R, {'mu': R, 'beta': Rplusbig}, gumbel)
 
+        def gumbellcdf(value, mu, beta):
+            return floatX(sp.gumbel_r.logcdf(value, loc=mu, scale=beta))
+        self.check_logcdf(Gumbel, R, {'mu': R, 'beta': Rplusbig}, gumbellcdf)
+
     def test_logistic(self):
         self.pymc3_matches_scipy(Logistic, R, {'mu': R, 's': Rplus},
                                  lambda value, mu, s: sp.logistic.logpdf(value, mu, s),
                                  decimal=select_by_precision(float64=6, float32=1))
+        self.check_logcdf(Logistic, R, {'mu': R, 's': Rplus},
+                          lambda value, mu, s: sp.logistic.logcdf(value, mu, s),
+                          decimal=select_by_precision(float64=6, float32=1))
 
     def test_logitnormal(self):
         self.pymc3_matches_scipy(LogitNormal, Unit, {'mu': R, 'sd': Rplus},
@@ -1055,6 +1175,12 @@ class TestMatchesScipy(SeededTest):
     def test_multidimensional_beta_construction(self):
         with Model():
             Beta('beta', alpha=1., beta=1., shape=(10, 20))
+
+    def test_rice(self):
+        self.pymc3_matches_scipy(Rice, Rplus, {'nu': Rplus, 'sd': Rplusbig},
+                                 lambda value, nu, sd: sp.rice.logpdf(value, b=nu / sd, loc=0, scale=sd))
+        self.pymc3_matches_scipy(Rice, Rplus, {'b': Rplus, 'sd': Rplusbig},
+                                 lambda value, b, sd: sp.rice.logpdf(value, b=b, loc=0, scale=sd))
 
     @pytest.mark.xfail(condition=(theano.config.floatX == "float32"), reason="Fails on float32")
     def test_interpolated(self):
@@ -1144,6 +1270,10 @@ def test_bound():
     rand = Bound(Binomial, lower=5, upper=8).dist(n=10, p=0.6).random()
     assert rand.dtype in [np.int16, np.int32, np.int64]
     assert rand >= 5 and rand <= 8
+
+    with Model():
+        BoundPoisson = Bound(Poisson, upper=6)
+        BoundPoisson(name="y", mu=1)
 
 
 class TestLatex(object):

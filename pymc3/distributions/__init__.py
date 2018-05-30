@@ -4,8 +4,10 @@ from . import transforms
 from .continuous import Uniform
 from .continuous import Flat
 from .continuous import HalfFlat
+from .continuous import TruncatedNormal
 from .continuous import Normal
 from .continuous import Beta
+from .continuous import Kumaraswamy
 from .continuous import Exponential
 from .continuous import Laplace
 from .continuous import StudentT
@@ -28,6 +30,7 @@ from .continuous import Gumbel
 from .continuous import Logistic
 from .continuous import LogitNormal
 from .continuous import Interpolated
+from .continuous import Rice
 
 from .discrete import Binomial
 from .discrete import BetaBinomial
@@ -68,6 +71,8 @@ from .multivariate import WishartBartlett
 from .multivariate import LKJCholeskyCov
 from .multivariate import LKJCorr
 
+from .simulator import Simulator
+
 from .timeseries import AR1
 from .timeseries import AR
 from .timeseries import GaussianRandomWalk
@@ -86,8 +91,10 @@ from .bound import Bound
 __all__ = ['Uniform',
            'Flat',
            'HalfFlat',
+           'TruncatedNormal',
            'Normal',
            'Beta',
+           'Kumaraswamy',
            'Exponential',
            'Laplace',
            'StudentT',
@@ -151,4 +158,4 @@ __all__ = ['Uniform',
            'LogitNormal',
            'Interpolated',
            'Bound',
-           ]
+           'Simulator']

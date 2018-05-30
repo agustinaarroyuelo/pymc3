@@ -1,5 +1,6 @@
 import numpy as np
 import numpy.random as nr
+from scipy.stats import multivariate_normal
 import theano
 import scipy.linalg
 import warnings
@@ -9,7 +10,7 @@ from .arraystep import ArrayStepShared, PopulationArrayStepShared, ArrayStep, me
 import pymc3 as pm
 from pymc3.theanof import floatX
 
-__all__ = ['Metropolis', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
+__all__ = ['Metropolis', 'DEMetropolis', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
            'CategoricalGibbsMetropolis', 'NormalProposal', 'CauchyProposal',
            'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal']
 
@@ -62,6 +63,9 @@ class MultivariateNormalProposal(Proposal):
         else:
             b = np.random.randn(self.n)
             return np.dot(self.chol, b)
+
+    def logp(self, s, value):
+        return multivariate_normal(np.zeros(s.shape[0]), cov=s).logpdf(value)
 
 
 class Metropolis(ArrayStepShared):

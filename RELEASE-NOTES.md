@@ -1,19 +1,73 @@
 # Release Notes
 
-
-## PyMC 3.5 (Unreleased)
-
+## PyMC3 3.6 (unreleased)
 
 ### New features
 
+- Track the model log-likelihood as a sampler stat for NUTS and HMC samplers
+  (accessible as `trace.get_sampler_stats('model_logp')`) (#3134)
+- Add Incomplete Beta function `incomplete_beta(a, b, value)`
+- Add log CDF functions to continuous distributions: `Beta`, `Cauchy`, `ExGaussian`, `Exponential`, `Flat`, `Gumbel`, `HalfCauchy`, `HalfFlat`, `HalfNormal`, `Laplace`, `Logistic`, `Lognormal`, `Normal`, `Pareto`, `StudentT`, `Triangular`, `Uniform`, `Wald`, `Weibull`.
+- Behavior of `sample_posterior_predictive` is now to produce posterior predictive samples, in order, from all values of the `trace`. Previously, by default it would produce 1 chain worth of samples, using a random selection from the `trace` (#3212)
+- Show diagnostics for initial energy errors in HMC and NUTS.
+- PR #3273 has added the `distributions.distribution._DrawValuesContext` context
+  manager. This is used to store the values already drawn in nested `random`
+  and `draw_values` calls, enabling `draw_values` to draw samples from the
+  joint probability distribution of RVs and not the marginals. Custom
+  distributions that must call `draw_values` several times in their `random`
+  method, or that invoke many calls to other distribution's `random` methods
+  (e.g. mixtures) must do all of these calls under the same `_DrawValuesContext`
+  context manager instance. If they do not, the conditional relations between
+  the distribution's parameters could be broken, and `random` could return
+  values drawn from an incorrect distribution.
+- `Rice` distribution is now defined with either the noncentrality parameter or the shape parameter (#3287).
+
+### Maintenance
+
+- Big rewrite of documentation (#3275)
+- Fixed Triangular distribution `c` attribute handling in `random` and updated sample codes for consistency (#3225)
+- Refactor SMC and properly compute marginal likelihood (#3124)
+- Removed use of deprecated `ymin` keyword in matplotlib's `Axes.set_ylim` (#3279)
+- Fix for #3210. Now `distribution.draw_values(params)`, will draw the `params` values from their joint probability distribution and not from combinations of their marginals (Refer to PR #3273).
+- Removed dependence on pandas-datareader for retrieving Yahoo Finance data in examples (#3262)
+- Rewrote `Multinomial._random` method to better handle shape broadcasting (#3271)
+- Fixed `Rice` distribution, which inconsistently mixed two parametrizations (#3286).
+- `Rice` distribution now accepts multiple parameters and observations and is usable with NUTS (#3289).
+- `sample_posterior_predictive` no longer calls `draw_values` to initialize the shape of the ppc trace. This called could lead to `ValueError`'s when sampling the ppc from a model with `Flat` or `HalfFlat` prior distributions (Fix issue #3294).
+
+
+### Deprecations
+
+- Renamed `sample_ppc()` and `sample_ppc_w()` to `sample_posterior_predictive()` and `sample_posterior_predictive_w()`, respectively.
+
+## PyMC 3.5 (July 21 2018)
+
+### New features
+
+- Add documentation section on survival analysis and censored data models
 - Add `check_test_point` method to `pm.Model`
 - Add `Ordered` Transformation and `OrderedLogistic` distribution
+- Add `Chain` transformation
+- Improve error message `Mass matrix contains zeros on the diagonal. Some derivatives might always be zero` during tuning of `pm.sample`
+- Improve error message `NaN occurred in optimization.` during ADVI
+- Save and load traces without `pickle` using `pm.save_trace` and `pm.load_trace`
+- Add `Kumaraswamy` distribution
+- Add `TruncatedNormal` distribution
+- Rewrite parallel sampling of multiple chains on py3. This resolves long standing issues when transferring large traces to the main process, avoids pickling issues on UNIX, and allows us to show a progress bar for all chains. If parallel sampling is interrupted, we now return partial results.
+- Add `sample_prior_predictive` which allows for efficient sampling from the unconditioned model.
+- SMC: remove experimental warning, allow sampling using `sample`, reduce autocorrelation from final trace.
+- Add `model_to_graphviz` (which uses the optional dependency `graphviz`) to plot a directed graph of a PyMC3 model using plate notation.
+- Add beta-ELBO variational inference as in beta-VAE model (Christopher P. Burgess et al. NIPS, 2017)
+- Add `__dir__` to `SingleGroupApproximation` to improve autocompletion in interactive environments
 
 ### Fixes
 
+- Fixed grammar in divergence warning, previously `There were 1 divergences ...` could be raised.
 - Fixed `KeyError` raised when only subset of variables are specified to be recorded in the trace.
 - Removed unused `repeat=None` arguments from all `random()` methods in distributions.
 - Deprecated the `sigma` argument in `MarginalSparse.marginal_likelihood` in favor of `noise`
+- Fixed unexpected behavior in `random`. Now the `random` functionality is more robust and will work better for `sample_prior` when that is implemented.
+- Fixed `scale_cost_to_minibatch` behaviour, previously this was not working and always `False`
 
 ## PyMC 3.4.1 (April 18 2018)
 
@@ -22,16 +76,13 @@
 - Add `logit_p` keyword to `pm.Bernoulli`, so that users can specify the logit of the success probability. This is faster and more stable than using `p=tt.nnet.sigmoid(logit_p)`.
 - Add `random` keyword to `pm.DensityDist` thus enabling users to pass custom random method which in turn makes sampling from a `DensityDist` possible.
 - Effective sample size computation is updated. The estimation uses Geyer's initial positive sequence, which no longer truncates the autocorrelation series inaccurately. `pm.diagnostics.effective_n` now can reports N_eff>N.
-- Added `KroneckerNormal` distribution and a corresponding `MarginalKron`
-  Gaussian Process implementation for efficient inference, along with
-  lower-level functions such as `cartesian` and `kronecker` products.
+- Added `KroneckerNormal` distribution and a corresponding `MarginalKron` Gaussian Process implementation for efficient inference, along with lower-level functions such as `cartesian` and `kronecker` products.
 - Added `Coregion` covariance function.
-- Add new 'pairplot' function, for plotting scatter or hexbin matrices of sampled parameters.
-  Optionally it can plot divergences.
+- Add new 'pairplot' function, for plotting scatter or hexbin matrices of sampled parameters. Optionally it can plot divergences.
 - Plots of discrete distributions in the docstrings
 - Add logitnormal distribution
 - Densityplot: add support for discrete variables
-- Fix the Binomial likelihood in `.glm.families.Binomial`, with the flexibility of specifying the `n`. 
+- Fix the Binomial likelihood in `.glm.families.Binomial`, with the flexibility of specifying the `n`.
 - Add `offset` kwarg to `.glm`.
 - Changed the `compare` function to accept a dictionary of model-trace pairs instead of two separate lists of models and traces.
 - add test and support for creating multivariate mixture and mixture of mixtures
@@ -69,7 +120,7 @@
 - Forestplot supports multiple traces (#2736)
 - Add new plot, densityplot (#2741)
 - DIC and BPIC calculations have been deprecated
-- Refactor HMC and implemented new warning system (#2677, #2808) 
+- Refactor HMC and implemented new warning system (#2677, #2808)
 
 ### Fixes
 
@@ -77,7 +128,7 @@
 - Improved `posteriorplot` to scale fonts
 - `sample_ppc_w` now broadcasts
 - `df_summary` function renamed to `summary`
-- Add test for `model.logp_array` and `model.bijection` (#2724) 
+- Add test for `model.logp_array` and `model.bijection` (#2724)
 - Fixed `sample_ppc` and `sample_ppc_w` to iterate all chains(#2633, #2748)
 - Add Bayesian R2 score (for GLMs) `stats.r2_score` (#2696) and test (#2729).
 - SMC works with transformed variables (#2755)
@@ -424,3 +475,4 @@ Thus, Thomas, Chris and I are pleased to announce that PyMC3 is now in Beta.
 * maahnman <github@mm.maahn.de>
 * paul sorenson <paul@metrak.com>
 * zenourn <daniel@zeno.co.nz>
+

@@ -24,15 +24,70 @@ class Transform(object):
     name = ""
 
     def forward(self, x):
+        """Applies transformation forward to input variable `x`.
+        When transform is used on some distribution `p`, it will transform the random variable `x` after sampling
+        from `p`.
+
+        Parameters
+        ----------
+        x : tensor
+            Input tensor to be transformed.
+
+        Returns
+        --------
+        tensor
+            Transformed tensor.
+        """
         raise NotImplementedError
 
     def forward_val(self, x, point):
+        """Applies transformation forward to input array `x`.
+        Similar to `forward` but for constant data.
+
+        Parameters
+        ----------
+        x : array_like
+            Input array to be transformed.
+        point : array_like, optional
+            Test value used to draw (fix) bounds-like transformations
+
+        Returns
+        --------
+        array_like
+            Transformed array.
+        """
         raise NotImplementedError
 
     def backward(self, z):
+        """Applies inverse of transformation to input variable `z`.
+        When transform is used on some distribution `p`, which has observed values `z`, it is used to
+        transform the values of `z` correctly to the support of `p`.
+
+        Parameters
+        ----------
+        z : tensor
+            Input tensor to be inverse transformed.
+
+        Returns
+        -------
+        tensor
+            Inverse transformed tensor.
+        """
         raise NotImplementedError
 
     def jacobian_det(self, x):
+        """Calculates logarithm of the absolute value of the Jacobian determinant for input `x`.
+
+        Parameters
+        ----------
+        x : tensor
+            Input to calculate Jacobian determinant of.
+
+        Returns
+        -------
+        tensor
+            The log abs Jacobian determinant of `x` w.r.t. this transform.
+        """
         raise NotImplementedError
 
     def apply(self, dist):
@@ -381,7 +436,7 @@ circular = Circular()
 
 
 class CholeskyCovPacked(Transform):
-    name = "cholesky_cov_packed"
+    name = "cholesky-cov-packed"
 
     def __init__(self, n):
         self.diag_idxs = np.arange(1, n + 1).cumsum() - 1
@@ -398,3 +453,45 @@ class CholeskyCovPacked(Transform):
 
     def jacobian_det(self, y):
         return tt.sum(y[self.diag_idxs])
+
+
+class Chain(Transform):
+    def __init__(self, transform_list):
+        self.transform_list = transform_list
+        self.name = '+'.join([transf.name for transf in self.transform_list])
+
+    def forward(self, x):
+        y = x
+        for transf in self.transform_list:
+            y = transf.forward(y)
+        return y
+
+    def forward_val(self, x, point=None):
+        y = x
+        for transf in self.transform_list:
+            y = transf.forward_val(y)
+        return y
+
+    def backward(self, y):
+        x = y
+        for transf in reversed(self.transform_list):
+            x = transf.backward(x)
+        return x
+
+    def jacobian_det(self, y):
+        y = tt.as_tensor_variable(y)
+        det_list = []
+        ndim0 = y.ndim
+        for transf in reversed(self.transform_list):
+            det_ = transf.jacobian_det(y)
+            det_list.append(det_)
+            y = transf.backward(y)
+            ndim0 = min(ndim0, det_.ndim)
+        # match the shape of the smallest jacobian_det
+        det = 0.
+        for det_ in det_list:
+            if det_.ndim > ndim0:
+                det += det_.sum(axis=-1)
+            else:
+                det += det_
+        return det

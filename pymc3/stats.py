@@ -1,20 +1,25 @@
 """Statistical utility functions for PyMC"""
+from collections import namedtuple
+import itertools
+import pkg_resources
+import warnings
 
 import numpy as np
 import pandas as pd
-import itertools
+from scipy.stats import dirichlet
+from scipy.optimize import minimize
+from scipy.signal import fftconvolve
 from tqdm import tqdm
-import warnings
-from collections import namedtuple
+
 from .model import modelcontext
 from .util import get_default_varnames
 import pymc3 as pm
 from pymc3.theanof import floatX
 
-from scipy.special import logsumexp
-from scipy.stats import dirichlet
-from scipy.optimize import minimize
-from scipy.signal import fftconvolve
+if pkg_resources.get_distribution('scipy').version < '1.0.0':
+    from scipy.misc import logsumexp
+else:
+    from scipy.special import logsumexp
 
 
 __all__ = ['autocorr', 'autocov', 'waic', 'loo', 'hpd', 'quantiles',
@@ -165,6 +170,8 @@ def _log_post_trace(trace, model=None, progressbar=False):
             points.close()
 
 
+WAIC_r_pointwise = namedtuple('WAIC_r_pointwise', 'WAIC, WAIC_se, p_WAIC, var_warn, WAIC_i')
+WAIC_r = namedtuple('WAIC_r', 'WAIC, WAIC_se, p_WAIC, var_warn')
 def waic(trace, model=None, pointwise=False, progressbar=False):
     """Calculate the widely available information criterion, its standard error
     and the effective number of parameters of the samples in trace from model.
@@ -190,7 +197,7 @@ def waic(trace, model=None, pointwise=False, progressbar=False):
     waic: widely available information criterion
     waic_se: standard error of waic
     p_waic: effective number parameters
-    var_warn: 1 if posterior variance of the log predictive 
+    var_warn: 1 if posterior variance of the log predictive
          densities exceeds 0.4
     waic_i: and array of the pointwise predictive accuracy, only if pointwise True
     """
@@ -225,13 +232,13 @@ def waic(trace, model=None, pointwise=False, progressbar=False):
             please double check the Observed RV in your model to make sure it
             returns element-wise logp.
             """)
-        WAIC_r = namedtuple('WAIC_r', 'WAIC, WAIC_se, p_WAIC, var_warn, WAIC_i')
-        return WAIC_r(waic, waic_se, p_waic, warn_mg, waic_i)
+        return WAIC_r_pointwise(waic, waic_se, p_waic, warn_mg, waic_i)
     else:
-        WAIC_r = namedtuple('WAIC_r', 'WAIC, WAIC_se, p_WAIC, var_warn')
         return WAIC_r(waic, waic_se, p_waic, warn_mg)
 
 
+LOO_r_pointwise = namedtuple('LOO_r_pointwise', 'LOO, LOO_se, p_LOO, shape_warn, LOO_i')
+LOO_r = namedtuple('LOO_r', 'LOO, LOO_se, p_LOO, shape_warn')
 def loo(trace, model=None, pointwise=False, reff=None, progressbar=False):
     """Calculates leave-one-out (LOO) cross-validation for out of sample
     predictive model fit, following Vehtari et al. (2015). Cross-validation is
@@ -260,7 +267,7 @@ def loo(trace, model=None, pointwise=False, reff=None, progressbar=False):
     loo: approximated Leave-one-out cross-validation
     loo_se: standard error of loo
     p_loo: effective number of parameters
-    shape_warn: 1 if the estimated shape parameter of 
+    shape_warn: 1 if the estimated shape parameter of
         Pareto distribution is greater than 0.7 for one or more samples
     loo_i: array of pointwise predictive accuracy, only if pointwise True
     """
@@ -304,10 +311,8 @@ def loo(trace, model=None, pointwise=False, reff=None, progressbar=False):
             please double check the Observed RV in your model to make sure it
             returns element-wise logp.
             """)
-        LOO_r = namedtuple('LOO_r', 'LOO, LOO_se, p_LOO, shape_warn, LOO_i')
-        return LOO_r(loo_lppd, loo_lppd_se, p_loo, warn_mg, loo_lppd_i)
+        return LOO_r_pointwise(loo_lppd, loo_lppd_se, p_loo, warn_mg, loo_lppd_i)
     else:
-        LOO_r = namedtuple('LOO_r', 'LOO, LOO_se, p_LOO, shape_warn')
         return LOO_r(loo_lppd, loo_lppd_se, p_loo, warn_mg)
 
 
@@ -698,6 +703,9 @@ def hpd(x, alpha=0.05, transform=lambda x: x):
     """Calculate highest posterior density (HPD) of array for given alpha. The HPD is the
     minimum width Bayesian credible interval (BCI).
 
+    This function assumes the posterior distribution is unimodal:
+    it always returns one interval per variable.
+
     :Arguments:
       x : Numpy array
           An array containing MCMC samples
@@ -1060,6 +1068,7 @@ def bfmi(trace):
     return np.square(np.diff(energy)).mean() / np.var(energy)
 
 
+r2_r = namedtuple('r2_r', 'r2_median, r2_mean, r2_std')
 def r2_score(y_true, y_pred, round_to=2):
     R"""R-squared for Bayesian regression models. Only valid for linear models.
     http://www.stat.columbia.edu/%7Egelman/research/unpublished/bayes_R2.pdf
@@ -1091,6 +1100,5 @@ def r2_score(y_true, y_pred, round_to=2):
     r2_median = np.around(np.median(r2), round_to)
     r2_mean = np.around(np.mean(r2), round_to)
     r2_std = np.around(np.std(r2), round_to)
-    r2_r = namedtuple('r2_r', 'r2_median, r2_mean, r2_std')
     return r2_r(r2_median, r2_mean, r2_std)
 

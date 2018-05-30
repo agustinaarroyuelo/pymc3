@@ -3,6 +3,7 @@ import functools
 import itertools
 import threading
 import six
+import warnings
 
 import numpy as np
 from pandas import Series
@@ -100,7 +101,7 @@ def get_named_nodes_and_relations(graph):
         is a theano named node, and the corresponding value is the set
         of theano named nodes that are children of the node. These child
         relations skip unnamed intermediate nodes.
-    
+
     """
     if graph.name is not None:
         node_parents = {graph: set()}
@@ -112,7 +113,7 @@ def get_named_nodes_and_relations(graph):
 
 def _get_named_nodes_and_relations(graph, parent, leaf_nodes,
                                         node_parents, node_children):
-    if graph.owner is None:  # Leaf node
+    if getattr(graph, 'owner', None) is None:  # Leaf node
         if graph.name is not None:  # Named leaf node
             leaf_nodes.update({graph.name: graph})
             if parent is not None:  # Is None for the root node
@@ -672,7 +673,7 @@ class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization
     @property
     @memoize(bound=True)
     def bijection(self):
-        vars = inputvars(self.cont_vars)
+        vars = inputvars(self.vars)
 
         bij = DictToArrayBijection(ArrayOrdering(vars),
                                    self.test_point)
@@ -737,7 +738,14 @@ class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization
         """Theano scalar of log-probability of the unobserved random variables
            (excluding deterministic)."""
         with self:
-            factors = [var.logpt for var in self.vars]
+            factors = [var.logpt for var in self.free_RVs]
+            return tt.sum(factors)
+
+    @property
+    def datalogpt(self):
+        with self:
+            factors = [var.logpt for var in self.observed_RVs]
+            factors += [tt.sum(factor) for factor in self.potentials]
             return tt.sum(factors)
 
     @property
@@ -1017,7 +1025,7 @@ class Model(six.with_metaclass(InitContextMeta, Context, Factor, WithMemoization
         if test_point is None:
             test_point = self.test_point
 
-        return Series({RV.name:np.round(RV.logp(self.test_point), round_vals) for RV in self.basic_RVs}, 
+        return Series({RV.name:np.round(RV.logp(self.test_point), round_vals) for RV in self.basic_RVs},
             name='Log-probability of test_point')
 
     def _repr_latex_(self, name=None, dist=None):
@@ -1244,7 +1252,7 @@ def pandas_to_array(data):
         ret = generator(data)
     else:
         ret = np.asarray(data)
-    return pm.smartfloatX(ret)
+    return pm.floatX(ret)
 
 
 def as_tensor(data, name, model, distribution):
@@ -1252,6 +1260,10 @@ def as_tensor(data, name, model, distribution):
     data = pandas_to_array(data).astype(dtype)
 
     if hasattr(data, 'mask'):
+        impute_message = ('Data in {name} contains missing values and'
+                          ' will be automatically imputed from the'
+                          ' sampling distribution.'.format(name=name))
+        warnings.warn(impute_message, UserWarning)
         from .distributions import NoDistribution
         testval = np.broadcast_to(distribution.default(), data.shape)[data.mask]
         fakedist = NoDistribution.dist(shape=data.mask.sum(), dtype=dtype,
@@ -1293,6 +1305,10 @@ class ObservedRV(Factor, TensorVariable):
             needed for upscaling logp
         """
         from .distributions import TensorType
+
+        if hasattr(data, 'type') and isinstance(data.type, tt.TensorType):
+            type = data.type
+
         if type is None:
             data = pandas_to_array(data)
             type = TensorType(distribution.dtype, data.shape)
@@ -1370,6 +1386,16 @@ class MultiObservedRV(Factor):
         self.distribution = distribution
         self.scaling = _get_scaling(total_size, self.logp_elemwiset.shape, self.logp_elemwiset.ndim)
 
+    # Make hashable by id for draw_values
+    def __hash__(self):
+        return id(self)
+
+    def __eq__(self, other):
+        return self.id == other.id
+
+    def __ne__(self, other):
+        return not self == other
+
 
 def _walk_up_rv(rv):
     """Walk up theano graph to get inputs for deterministic RV."""
@@ -1404,7 +1430,7 @@ def Deterministic(name, var, model=None):
     var : var, with name attribute
     """
     model = modelcontext(model)
-    var.name = model.name_for(name)
+    var = var.copy(model.name_for(name))
     model.deterministics.append(var)
     model.add_random_variable(var)
     var._repr_latex_ = functools.partial(_latex_repr_rv, var)
@@ -1457,6 +1483,8 @@ class TransformedRV(TensorVariable):
         if distribution is not None:
             self.model = model
             self.distribution = distribution
+            self.dshape = tuple(distribution.shape)
+            self.dsize = int(np.prod(distribution.shape))
 
             transformed_name = get_transformed_name(name, transform)
 

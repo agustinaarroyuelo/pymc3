@@ -1,9 +1,7 @@
+# coding: utf-8
 """
-pymc3.distributions
-
 A collection of common probability distributions for stochastic
 nodes in PyMC.
-
 """
 from __future__ import division
 
@@ -18,15 +16,19 @@ from pymc3.theanof import floatX
 from . import transforms
 from pymc3.util import get_variable_name
 from .special import log_i0
-from ..math import invlogit, logit
-from .dist_math import bound, logpow, gammaln, betaln, std_cdf, alltrue_elemwise, SplineWrapper
+from ..math import invlogit, logit, logdiffexp
+from .dist_math import (
+    alltrue_elemwise, betaln, bound, gammaln, i0e, incomplete_beta, logpow,
+    normal_lccdf, normal_lcdf, SplineWrapper, std_cdf, zvalue,
+)
 from .distribution import Continuous, draw_values, generate_samples
 
-__all__ = ['Uniform', 'Flat', 'HalfFlat', 'Normal', 'Beta', 'Exponential',
-           'Laplace', 'StudentT', 'Cauchy', 'HalfCauchy', 'Gamma', 'Weibull',
-           'HalfStudentT', 'Lognormal', 'ChiSquared', 'HalfNormal', 'Wald',
-           'Pareto', 'InverseGamma', 'ExGaussian', 'VonMises', 'SkewNormal',
-           'Triangular', 'Gumbel', 'Logistic', 'LogitNormal', 'Interpolated']
+__all__ = ['Uniform', 'Flat', 'HalfFlat', 'Normal', 'TruncatedNormal', 'Beta',
+           'Kumaraswamy', 'Exponential', 'Laplace', 'StudentT', 'Cauchy',
+           'HalfCauchy', 'Gamma', 'Weibull', 'HalfStudentT', 'Lognormal',
+           'ChiSquared', 'HalfNormal', 'Wald', 'Pareto', 'InverseGamma',
+           'ExGaussian', 'VonMises', 'SkewNormal', 'Triangular', 'Gumbel',
+           'Logistic', 'LogitNormal', 'Interpolated', 'Rice']
 
 
 class PositiveContinuous(Continuous):
@@ -44,6 +46,30 @@ class UnitContinuous(Continuous):
         super(UnitContinuous, self).__init__(
             transform=transform, *args, **kwargs)
 
+
+class BoundedContinuous(Continuous):
+    """Base class for bounded continuous distributions"""
+
+    def __init__(self, transform='auto', lower=None, upper=None,
+                 *args, **kwargs):
+
+        lower = tt.as_tensor_variable(lower) if lower is not None else None
+        upper = tt.as_tensor_variable(upper) if upper is not None else None
+
+        if transform == 'auto':
+            if lower is None and upper is None:
+                transform = None
+            elif lower is not None and upper is None:
+                transform = transforms.lowerbound(lower)
+            elif lower is None and upper is not None:
+                transform = transforms.upperbound(upper)
+            else:
+                transform = transforms.interval(lower, upper)
+
+        super(BoundedContinuous, self).__init__(
+            transform=transform, *args, **kwargs)
+
+
 def assert_negative_support(var, label, distname, value=-1e-6):
     # Checks for evidence of positive support for a variable
     if var is None:
@@ -51,7 +77,7 @@ def assert_negative_support(var, label, distname, value=-1e-6):
     try:
         # Transformed distribution
         support = np.isfinite(var.transformed.distribution.dist
-                                .logp(value).tag.test_value)
+                              .logp(value).tag.test_value)
     except AttributeError:
         try:
             # Untransformed distribution
@@ -61,14 +87,15 @@ def assert_negative_support(var, label, distname, value=-1e-6):
             support = False
 
     if np.any(support):
-        msg = "The variable specified for {0} has negative support for {1}, ".format(label, distname)
+        msg = "The variable specified for {0} has negative support for {1}, ".format(
+            label, distname)
         msg += "likely making it unsuitable for this parameter."
         warnings.warn(msg)
 
 
 def get_tau_sd(tau=None, sd=None):
     """
-    Find precision and standard deviation. The link between the two 
+    Find precision and standard deviation. The link between the two
     parameterizations is given by the inverse relationship:
 
     .. math::
@@ -105,10 +132,10 @@ def get_tau_sd(tau=None, sd=None):
     tau = 1. * tau
     sd = 1. * sd
 
-    return (floatX(tau), floatX(sd))
+    return floatX(tau), floatX(sd)
 
 
-class Uniform(Continuous):
+class Uniform(BoundedContinuous):
     R"""
     Continuous uniform log-likelihood.
 
@@ -150,26 +177,53 @@ class Uniform(Continuous):
         Upper limit.
     """
 
-    def __init__(self, lower=0, upper=1, transform='interval',
-                 *args, **kwargs):
+    def __init__(self, lower=0, upper=1, *args, **kwargs):
         self.lower = lower = tt.as_tensor_variable(floatX(lower))
         self.upper = upper = tt.as_tensor_variable(floatX(upper))
         self.mean = (upper + lower) / 2.
         self.median = self.mean
 
-        if transform == 'interval':
-            transform = transforms.interval(lower, upper)
-        super(Uniform, self).__init__(transform=transform, *args, **kwargs)
+        super(Uniform, self).__init__(
+            lower=lower, upper=upper, *args, **kwargs)
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from Uniform distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+
         lower, upper = draw_values([self.lower, self.upper],
-                                   point=point)
+                                   point=point, size=size)
         return generate_samples(stats.uniform.rvs, loc=lower,
                                 scale=upper - lower,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Uniform distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value for which log-probability is calculated.
+
+        Returns
+        -------
+        TensorVariable
+        """
         lower = self.lower
         upper = self.upper
         return bound(-tt.log(upper - lower),
@@ -184,6 +238,18 @@ class Uniform(Continuous):
         return r'${} \sim \text{{Uniform}}(\mathit{{lower}}={},~\mathit{{upper}}={})$'.format(
             name, get_variable_name(lower), get_variable_name(upper))
 
+    def logcdf(self, value):
+        return tt.switch(
+            tt.or_(tt.lt(value, self.lower), tt.gt(value, self.upper)),
+            -np.inf,
+            tt.switch(
+                tt.eq(value, self.upper),
+                0,
+                tt.log((value - self.lower)) -
+                tt.log((self.upper - self.lower))
+            )
+        )
+
 
 class Flat(Continuous):
     """
@@ -196,14 +262,49 @@ class Flat(Continuous):
         super(Flat, self).__init__(defaults=('_default',), *args, **kwargs)
 
     def random(self, point=None, size=None):
+        """Raises ValueError as it is not possible to sample from Flat distribution
+
+        Parameters
+        ----------
+        point : dict, optional
+        size : int, optional
+
+        Raises
+        -------
+        ValueError
+        """
         raise ValueError('Cannot sample from Flat distribution')
 
     def logp(self, value):
+        """
+        Calculate log-probability of Flat distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         return tt.zeros_like(value)
 
     def _repr_latex_(self, name=None, dist=None):
         name = r'\text{%s}' % name
         return r'${} \sim \text{{Flat}}()$'.format(name)
+
+    def logcdf(self, value):
+        return tt.switch(
+            tt.eq(value, -np.inf),
+            -np.inf,
+            tt.switch(
+                tt.eq(value, np.inf),
+                0,
+                tt.log(0.5)
+            )
+        )
 
 
 class HalfFlat(PositiveContinuous):
@@ -214,14 +315,49 @@ class HalfFlat(PositiveContinuous):
         super(HalfFlat, self).__init__(defaults=('_default',), *args, **kwargs)
 
     def random(self, point=None, size=None):
+        """Raises ValueError as it is not possible to sample from HalfFlat distribution
+
+        Parameters
+        ----------
+        point : dict, optional
+        size : int, optional
+
+        Raises
+        -------
+        ValueError
+        """
         raise ValueError('Cannot sample from HalfFlat distribution')
 
     def logp(self, value):
+        """
+        Calculate log-probability of HalfFlat distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         return bound(tt.zeros_like(value), value > 0)
 
     def _repr_latex_(self, name=None, dist=None):
         name = r'\text{%s}' % name
         return r'${} \sim \text{{HalfFlat}}()$'.format(name)
+
+    def logcdf(self, value):
+        return tt.switch(
+            tt.lt(value, np.inf),
+            -np.inf,
+            tt.switch(
+                tt.eq(value, np.inf),
+                0,
+                -np.inf
+            )
+        )
 
 
 class Normal(Continuous):
@@ -275,14 +411,14 @@ class Normal(Continuous):
         Standard deviation (sd > 0) (only required if tau is not specified).
     tau : float
         Precision (tau > 0) (only required if sd is not specified).
-        
+
     Examples
     --------
     .. code-block:: python
 
         with pm.Model():
             x = pm.Normal('x', mu=0, sd=10)
-            
+
         with pm.Model():
             x = pm.Normal('x', mu=0, tau=1/23)
     """
@@ -301,13 +437,42 @@ class Normal(Continuous):
         super(Normal, self).__init__(**kwargs)
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from Normal distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         mu, tau, _ = draw_values([self.mu, self.tau, self.sd],
-                                 point=point)
+                                 point=point, size=size)
         return generate_samples(stats.norm.rvs, loc=mu, scale=tau**-0.5,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Normal distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         sd = self.sd
         tau = self.tau
         mu = self.mu
@@ -324,6 +489,203 @@ class Normal(Continuous):
         return r'${} \sim \text{{Normal}}(\mathit{{mu}}={},~\mathit{{sd}}={})$'.format(name,
                                                                 get_variable_name(mu),
                                                                 get_variable_name(sd))
+
+    def logcdf(self, value):
+        return normal_lcdf(self.mu, self.sd, value)
+
+
+class TruncatedNormal(BoundedContinuous):
+    R"""
+    Univariate truncated normal log-likelihood.
+
+    The pdf of this distribution is
+
+    .. math::
+
+       f(x;\mu ,\sigma ,a,b)={\frac {\phi ({\frac {x-\mu }{\sigma }})}{
+       \sigma \left(\Phi ({\frac {b-\mu }{\sigma }})-\Phi ({\frac {a-\mu }{\sigma }})\right)}}
+
+    Truncated normal distribution can be parameterized either in terms of precision
+    or standard deviation. The link between the two parametrizations is
+    given by
+
+    .. math::
+
+       \tau = \dfrac{1}{\sigma^2}
+
+
+    .. plot::
+
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import scipy.stats as st
+        plt.style.use('seaborn-darkgrid')
+        x = np.linspace(-10, 10, 1000)
+        mus = [0.,  0., 0.]
+        sds = [3.,5.,7.]
+        a1 = [-3, -5, -5]
+        b1 = [7, 5, 4]
+        for mu, sd, a, b in zip(mus, sds,a1,b1):
+            print mu, sd, a, b
+            an, bn = (a - mu) / sd, (b - mu) / sd
+            pdf = st.truncnorm.pdf(x, an,bn, loc=mu, scale=sd)
+            plt.plot(x, pdf, label=r'$\mu$ = {}, $\sigma$ = {}, a={}, b={}'.format(mu, sd, a, b))
+        plt.xlabel('x', fontsize=12)
+        plt.ylabel('f(x)', fontsize=12)
+        plt.legend(loc=1)
+        plt.show()
+
+    ========  ==========================================
+    Support   :math:`x \in [a, b]`
+    Mean      :math:`\mu +{\frac {\phi (\alpha )-\phi (\beta )}{Z}}\sigma`
+    Variance  :math:`\sigma ^{2}\left[1+{\frac {\alpha \phi (\alpha )-\beta \phi (\beta )}{Z}}-
+    \left({\frac {\phi (\alpha )-\phi (\beta )}{Z}}\right)^{2}\right]`
+    ========  ==========================================
+
+    Parameters
+    ----------
+    mu : float
+        Mean.
+    sd : float
+        Standard deviation (sd > 0).
+    lower : float (optional)
+        Left bound.
+    upper : float (optional)
+        Right bound.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        with pm.Model():
+            x = pm.TruncatedNormal('x', mu=0, sd=10, lower=0)
+
+        with pm.Model():
+            x = pm.TruncatedNormal('x', mu=0, sd=10, upper=1)
+
+        with pm.Model():
+            x = pm.TruncatedNormal('x', mu=0, sd=10, lower=0, upper=1)
+
+    """
+
+    def __init__(self, mu=0, sd=None, tau=None, lower=None, upper=None,
+                 transform='auto', *args, **kwargs):
+        tau, sd = get_tau_sd(tau=tau, sd=sd)
+        self.sd = tt.as_tensor_variable(sd)
+        self.tau = tt.as_tensor_variable(tau)
+        self.lower = tt.as_tensor_variable(lower) if lower is not None else lower
+        self.upper = tt.as_tensor_variable(upper) if upper is not None else upper
+        self.mu = tt.as_tensor_variable(mu)
+
+        if self.lower is None and self.upper is None:
+            self._defaultval = mu
+        elif self.lower is None and self.upper is not None:
+            self._defaultval = self.upper - 1.
+        elif self.lower is not None and self.upper is None:
+            self._defaultval = self.lower + 1.
+        else:
+            self._defaultval = (self.lower + self.upper) / 2
+
+        assert_negative_support(sd, 'sd', 'TruncatedNormal')
+        assert_negative_support(tau, 'tau', 'TruncatedNormal')
+
+        super(TruncatedNormal, self).__init__(
+            defaults=('_defaultval',), transform=transform,
+            lower=lower, upper=upper, *args, **kwargs)
+
+    def random(self, point=None, size=None):
+        """
+        Draw random values from TruncatedNormal distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        mu_v, std_v, a_v, b_v = draw_values(
+            [self.mu, self.sd, self.lower, self.upper], point=point, size=size)
+        return generate_samples(stats.truncnorm.rvs,
+                                a=(a_v - mu_v)/std_v,
+                                b=(b_v - mu_v) / std_v,
+                                loc=mu_v,
+                                scale=std_v,
+                                dist_shape=self.shape,
+                                size=size,
+                                )
+
+    def logp(self, value):
+        """
+        Calculate log-probability of TruncatedNormal distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
+        mu = self.mu
+        sd = self.sd
+
+        norm = self._normalization()
+        logp = Normal.dist(mu=mu, sd=sd).logp(value) - norm
+
+        bounds = [sd > 0]
+        if self.lower is not None:
+            bounds.append(value >= self.lower)
+        if self.upper is not None:
+            bounds.append(value <= self.upper)
+        return bound(logp, *bounds)
+
+    def _normalization(self):
+        mu, sd = self.mu, self.sd
+
+        if self.lower is None and self.upper is None:
+            return 0.
+
+        if self.lower is not None and self.upper is not None:
+            lcdf_a = normal_lcdf(mu, sd, self.lower)
+            lcdf_b = normal_lcdf(mu, sd, self.upper)
+            lsf_a = normal_lccdf(mu, sd, self.lower)
+            lsf_b = normal_lccdf(mu, sd, self.upper)
+
+            return tt.switch(
+                self.lower > 0,
+                logdiffexp(lsf_a, lsf_b),
+                logdiffexp(lcdf_b, lcdf_a),
+            )
+
+        if self.lower is not None:
+            return normal_lccdf(mu, sd, self.lower)
+        else:
+            return normal_lcdf(mu, sd, self.upper)
+
+    def _repr_latex_(self, name=None, dist=None):
+        if dist is None:
+            dist = self
+        name = r'\text{%s}' % name
+        return (
+            r'${} \sim \text{{TruncatedNormal}}('
+            '\mathit{{mu}}={},~\mathit{{sd}}={},a={},b={})$'
+            .format(
+                name,
+                get_variable_name(self.mu),
+                get_variable_name(self.sd),
+                get_variable_name(self.lower),
+                get_variable_name(self.upper),
+            )
+        )
 
 
 class HalfNormal(PositiveContinuous):
@@ -403,12 +765,41 @@ class HalfNormal(PositiveContinuous):
         assert_negative_support(sd, 'sd', 'HalfNormal')
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from HalfNormal distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         sd = draw_values([self.sd], point=point)[0]
         return generate_samples(stats.halfnorm.rvs, loc=0., scale=sd,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of HalfNormal distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         tau = self.tau
         sd = self.sd
         return bound(-0.5 * tau * value**2 + 0.5 * tt.log(tau * 2. / np.pi),
@@ -421,7 +812,16 @@ class HalfNormal(PositiveContinuous):
         sd = dist.sd
         name = r'\text{%s}' % name
         return r'${} \sim \text{{HalfNormal}}(\mathit{{sd}}={})$'.format(name,
-                                                                get_variable_name(sd))
+                                                                         get_variable_name(sd))
+
+    def logcdf(self, value):
+        sd = self.sd
+        z = zvalue(value, mu=0, sd=sd)
+        return tt.switch(
+            tt.lt(z, -1.0),
+            tt.log(tt.erfcx(-z / tt.sqrt(2.))) - tt.sqr(z),
+            tt.log1p(-tt.erfc(z / tt.sqrt(2.)))
+        )
 
 
 class Wald(PositiveContinuous):
@@ -497,6 +897,9 @@ class Wald(PositiveContinuous):
     .. [Michael1976] Michael, J. R., Schucany, W. R. and Hass, R. W. (1976).
         Generating Random Variates Using Transformations with Multiple Roots.
         The American Statistician, Vol. 30, No. 2, pp. 88-90
+
+    .. [Giner2016] Göknur Giner, Gordon K. Smyth (2016)
+       statmod: Probability Calculations for the Inverse Gaussian Distribution
     """
 
     def __init__(self, mu=None, lam=None, phi=None, alpha=0., *args, **kwargs):
@@ -543,14 +946,43 @@ class Wald(PositiveContinuous):
         return value + alpha
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from Wald distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         mu, lam, alpha = draw_values([self.mu, self.lam, self.alpha],
-                                     point=point)
+                                     point=point, size=size)
         return generate_samples(self._random,
                                 mu, lam, alpha,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Wald distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         mu = self.mu
         lam = self.lam
         alpha = self.alpha
@@ -574,6 +1006,46 @@ class Wald(PositiveContinuous):
                                                                 get_variable_name(mu),
                                                                 get_variable_name(lam),
                                                                 get_variable_name(alpha))
+
+    def logcdf(self, value):
+        # Distribution parameters
+        mu = self.mu
+        lam = self.lam
+        alpha = self.alpha
+
+        value -= alpha
+        q = value / mu
+        l = lam * mu
+        r = tt.sqrt(value * lam)
+
+        a = normal_lcdf(0, 1, (q - 1.)/r)
+        b = 2./l + normal_lcdf(0, 1, -(q + 1.)/r)
+        return tt.switch(
+            (
+                # Left limit
+                tt.lt(value, 0) |
+                (tt.eq(value, 0) & tt.gt(mu, 0) & tt.lt(lam, np.inf)) |
+                (tt.lt(value, mu) & tt.eq(lam, 0))
+            ),
+            -np.inf,
+            tt.switch(
+                (
+                    # Right limit
+                    tt.eq(value, np.inf) |
+                    (tt.eq(lam, 0) & tt.gt(value, mu)) |
+                    (tt.gt(value, 0) & tt.eq(lam, np.inf)) |
+                    # Degenerate distribution
+                    (
+                        tt.lt(mu, np.inf) &
+                        tt.eq(mu, value) &
+                        tt.eq(lam, 0)
+                    ) |
+                    (tt.eq(value, 0) & tt.eq(lam, np.inf))
+                ),
+                0,
+                a + tt.log1p(tt.exp(b - a))
+            )
+        )
 
 
 class Beta(UnitContinuous):
@@ -668,13 +1140,42 @@ class Beta(UnitContinuous):
         return alpha, beta
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from Beta distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         alpha, beta = draw_values([self.alpha, self.beta],
-                                  point=point)
+                                  point=point, size=size)
         return generate_samples(stats.beta.rvs, alpha, beta,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Beta distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         alpha = self.alpha
         beta = self.beta
 
@@ -688,6 +1189,20 @@ class Beta(UnitContinuous):
                      value >= 0, value <= 1,
                      alpha > 0, beta > 0)
 
+    def logcdf(self, value):
+        value = floatX(tt.as_tensor(value))
+        a = floatX(tt.as_tensor(self.alpha))
+        b = floatX(tt.as_tensor(self.beta))
+        return tt.switch(
+            tt.le(value, 0),
+            -np.inf,
+            tt.switch(
+                tt.ge(value, 1),
+                0,
+                tt.log(incomplete_beta(a, b, value))
+            )
+        )
+
     def _repr_latex_(self, name=None, dist=None):
         if dist is None:
             dist = self
@@ -697,6 +1212,122 @@ class Beta(UnitContinuous):
         return r'${} \sim \text{{Beta}}(\mathit{{alpha}}={},~\mathit{{beta}}={})$'.format(name,
                                                                 get_variable_name(alpha),
                                                                 get_variable_name(beta))
+
+class Kumaraswamy(UnitContinuous):
+    R"""
+    Kumaraswamy log-likelihood.
+
+    The pdf of this distribution is
+
+    .. math::
+
+       f(x \mid a, b) =
+           abx^{a-1}(1-x^a)^{b-1}
+
+    .. plot::
+
+        import matplotlib.pyplot as plt
+        import numpy as np
+        plt.style.use('seaborn-darkgrid')
+        x = np.linspace(0, 1, 200)
+        a_s = [.5, 5., 1., 2., 2.]
+        b_s = [.5, 1., 3., 2., 5.]
+        for a, b in zip(a_s, b_s):
+            pdf = a * b * x ** (a - 1) * (1 - x ** a) ** (b - 1)
+            plt.plot(x, pdf, label=r'$a$ = {}, $b$ = {}'.format(a, b))
+        plt.xlabel('x', fontsize=12)
+        plt.ylabel('f(x)', fontsize=12)
+        plt.ylim(0, 3.)
+        plt.legend(loc=9)
+        plt.show()
+
+    ========  ==============================================================
+    Support   :math:`x \in (0, 1)`
+    Mean      :math:`b B(1 + \tfrac{1}{a}, b)`
+    Variance  :math:`b B(1 + \tfrac{2}{a}, b) - (b B(1 + \tfrac{1}{a}, b))^2`
+    ========  ==============================================================
+
+    Parameters
+    ----------
+    a : float
+        a > 0.
+    b : float
+        b > 0.
+    """
+
+    def __init__(self, a, b, *args, **kwargs):
+        super(Kumaraswamy, self).__init__(*args, **kwargs)
+
+        self.a = a = tt.as_tensor_variable(a)
+        self.b = b = tt.as_tensor_variable(b)
+
+        ln_mean = tt.log(b) + tt.gammaln(1 + 1 / a) + tt.gammaln(b) - tt.gammaln(1 + 1 / a + b)
+        self.mean = tt.exp(ln_mean)
+        ln_2nd_raw_moment = tt.log(b) + tt.gammaln(1 + 2 / a) + tt.gammaln(b) - tt.gammaln(1 + 2 / a + b)
+        self.variance = tt.exp(ln_2nd_raw_moment) - self.mean ** 2
+
+        assert_negative_support(a, 'a', 'Kumaraswamy')
+        assert_negative_support(b, 'b', 'Kumaraswamy')
+
+    def _random(self, a, b, size=None):
+        u = np.random.uniform(size=size)
+        return (1 - (1 - u) ** (1 / b)) ** (1 / a)
+
+    def random(self, point=None, size=None):
+        """
+        Draw random values from Kumaraswamy distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        a, b = draw_values([self.a, self.b],
+                           point=point, size=size)
+        return generate_samples(self._random, a, b,
+                                dist_shape=self.shape,
+                                size=size)
+
+    def logp(self, value):
+        """
+        Calculate log-probability of Kumaraswamy distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
+        a = self.a
+        b = self.b
+
+        logp = tt.log(a) + tt.log(b) + (a - 1) * tt.log(value) + (b - 1) * tt.log(1 - value ** a)
+
+        return bound(logp,
+                     value >= 0, value <= 1,
+                     a > 0, b > 0)
+
+    def _repr_latex_(self, name=None, dist=None):
+        if dist is None:
+            dist = self
+        a = dist.a
+        b = dist.b
+        name = r'\text{%s}' % name
+        return r'${} \sim \text{{Kumaraswamy}}(\mathit{{a}}={},~\mathit{{b}}={})$'.format(name,
+                                                                                          get_variable_name(a),
+                                                                                          get_variable_name(b))
 
 
 class Exponential(PositiveContinuous):
@@ -748,12 +1379,41 @@ class Exponential(PositiveContinuous):
         assert_negative_support(lam, 'lam', 'Exponential')
 
     def random(self, point=None, size=None):
-        lam = draw_values([self.lam], point=point)[0]
+        """
+        Draw random values from Exponential distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        lam = draw_values([self.lam], point=point, size=size)[0]
         return generate_samples(np.random.exponential, scale=1. / lam,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Exponential distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         lam = self.lam
         return bound(tt.log(lam) - lam * value, value >= 0, lam > 0)
 
@@ -764,6 +1424,30 @@ class Exponential(PositiveContinuous):
         name = r'\text{%s}' % name
         return r'${} \sim \text{{Exponential}}(\mathit{{lam}}={})$'.format(name,
                                                                 get_variable_name(lam))
+
+    def logcdf(self, value):
+        """
+        Compute the log CDF for the Exponential distribution
+
+        References
+        ----------
+        .. [Machler2012] Martin Mächler (2012).
+            "Accurately computing log(1-exp(-|a|)) Assessed by the Rmpfr
+            package"
+        """
+        value = floatX(tt.as_tensor(value))
+        lam = self.lam
+        a = lam * value
+        return tt.switch(
+            tt.le(value, 0.0),
+            -np.inf,
+            tt.switch(
+                tt.le(a, tt.log(2.0)),
+                tt.log(-tt.expm1(-a)),
+                tt.log1p(-tt.exp(-a)),
+            )
+        )
+
 
 class Laplace(Continuous):
     R"""
@@ -817,12 +1501,41 @@ class Laplace(Continuous):
         assert_negative_support(b, 'b', 'Laplace')
 
     def random(self, point=None, size=None):
-        mu, b = draw_values([self.mu, self.b], point=point)
+        """
+        Draw random values from Laplace distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        mu, b = draw_values([self.mu, self.b], point=point, size=size)
         return generate_samples(np.random.laplace, mu, b,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Laplace distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         mu = self.mu
         b = self.b
 
@@ -837,6 +1550,20 @@ class Laplace(Continuous):
         return r'${} \sim \text{{Laplace}}(\mathit{{mu}}={},~\mathit{{b}}={})$'.format(name,
                                                                 get_variable_name(mu),
                                                                 get_variable_name(b))
+
+    def logcdf(self, value):
+        a = self.mu
+        b = self.b
+        y = (value - a) / b
+        return tt.switch(
+            tt.le(value, a),
+            tt.log(0.5) + y,
+            tt.switch(
+                tt.gt(y, 1),
+                tt.log1p(-0.5 * tt.exp(-y)),
+                tt.log(1 - 0.5 * tt.exp(-y))
+            )
+        )
 
 
 class Lognormal(PositiveContinuous):
@@ -887,7 +1614,7 @@ class Lognormal(PositiveContinuous):
         Standard deviation. (sd > 0). (only required if tau is not specified).
     tau : float
         Scale parameter (tau > 0). (only required if sd is not specified).
-        
+
     Example
     -------
     .. code-block:: python
@@ -921,12 +1648,41 @@ class Lognormal(PositiveContinuous):
         return np.exp(mu + (tau**-0.5) * samples)
 
     def random(self, point=None, size=None):
-        mu, tau = draw_values([self.mu, self.tau], point=point)
+        """
+        Draw random values from Lognormal distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        mu, tau = draw_values([self.mu, self.tau], point=point, size=size)
         return generate_samples(self._random, mu, tau,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Lognormal distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         mu = self.mu
         tau = self.tau
         return bound(-0.5 * tau * (tt.log(value) - mu)**2
@@ -943,6 +1699,22 @@ class Lognormal(PositiveContinuous):
         return r'${} \sim \text{{Lognormal}}(\mathit{{mu}}={},~\mathit{{tau}}={})$'.format(name,
                                                                 get_variable_name(mu),
                                                                 get_variable_name(tau))
+
+    def logcdf(self, value):
+        mu = self.mu
+        sd = self.sd
+        z = zvalue(tt.log(value), mu=mu, sd=sd)
+
+        return tt.switch(
+            tt.le(value, 0),
+            -np.inf,
+            tt.switch(
+                tt.lt(z, -1.0),
+                tt.log(tt.erfcx(-z / tt.sqrt(2.)) / 2.) -
+                tt.sqr(z) / 2,
+                tt.log1p(-tt.erfc(z / tt.sqrt(2.)) / 2.)
+            )
+        )
 
 
 class StudentT(Continuous):
@@ -991,17 +1763,19 @@ class StudentT(Continuous):
     mu : float
         Location parameter.
     sd : float
-        Standard deviation (sd > 0) (only required if lam is not specified)
+        Scale parameter (sd > 0). Converges to the standard deviation as nu
+        increases. (only required if lam is not specified)
     lam : float
-        Precision (lam > 0) (only required if sd is not specified)
-        
+        Scale parameter (lam > 0). Converges to the precision as nu
+        increases. (only required if sd is not specified)
+
     Examples
     --------
     .. code-block:: python
 
         with pm.Model():
             x = pm.StudentT('x', nu=15, mu=0, sd=10)
-            
+
         with pm.Model():
             x = pm.StudentT('x', nu=15, mu=0, lam=1/23)
     """
@@ -1022,13 +1796,42 @@ class StudentT(Continuous):
         assert_negative_support(nu, 'nu', 'StudentT')
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from StudentT distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         nu, mu, lam = draw_values([self.nu, self.mu, self.lam],
-                                  point=point)
+                                  point=point, size=size)
         return generate_samples(stats.t.rvs, nu, loc=mu, scale=lam**-0.5,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of StudentT distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         nu = self.nu
         mu = self.mu
         lam = self.lam
@@ -1052,8 +1855,17 @@ class StudentT(Continuous):
                                                                 get_variable_name(mu),
                                                                 get_variable_name(lam))
 
+    def logcdf(self, value):
+        nu = self.nu
+        mu = self.mu
+        sd = self.sd
+        t = (value - mu)/sd
+        sqrt_t2_nu = tt.sqrt(t**2 + nu)
+        x = (t + sqrt_t2_nu)/(2.0 * sqrt_t2_nu)
+        return tt.log(incomplete_beta(nu/2., nu/2., x))
 
-class Pareto(PositiveContinuous):
+
+class Pareto(Continuous):
     R"""
     Pareto log-likelihood.
 
@@ -1098,8 +1910,7 @@ class Pareto(PositiveContinuous):
         Scale parameter (m > 0).
     """
 
-    def __init__(self, alpha, m, *args, **kwargs):
-        super(Pareto, self).__init__(*args, **kwargs)
+    def __init__(self, alpha, m, transform='lowerbound', *args, **kwargs):
         self.alpha = alpha = tt.as_tensor_variable(alpha)
         self.m = m = tt.as_tensor_variable(m)
 
@@ -1114,19 +1925,51 @@ class Pareto(PositiveContinuous):
         assert_negative_support(alpha, 'alpha', 'Pareto')
         assert_negative_support(m, 'm', 'Pareto')
 
+        if transform == 'lowerbound':
+            transform = transforms.lowerbound(self.m)
+        super(Pareto, self).__init__(transform=transform, *args, **kwargs)
 
     def _random(self, alpha, m, size=None):
         u = np.random.uniform(size=size)
         return m * (1. - u)**(-1. / alpha)
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from Pareto distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         alpha, m = draw_values([self.alpha, self.m],
-                               point=point)
+                               point=point, size=size)
         return generate_samples(self._random, alpha, m,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Pareto distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         alpha = self.alpha
         m = self.m
         return bound(tt.log(alpha) + logpow(m, alpha)
@@ -1142,6 +1985,20 @@ class Pareto(PositiveContinuous):
         return r'${} \sim \text{{Pareto}}(\mathit{{alpha}}={},~\mathit{{m}}={})$'.format(name,
                                                                 get_variable_name(alpha),
                                                                 get_variable_name(m))
+
+    def logcdf(self, value):
+        m = self.m
+        alpha = self.alpha
+        arg = (m / value) ** alpha
+        return tt.switch(
+            tt.lt(value, m),
+            -np.inf,
+            tt.switch(
+                tt.le(arg, 1e-5),
+                tt.log1p(-arg),
+                tt.log(1 - arg)
+            )
+        )
 
 
 class Cauchy(Continuous):
@@ -1201,13 +2058,42 @@ class Cauchy(Continuous):
         return alpha + beta * np.tan(np.pi * (u - 0.5))
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from Cauchy distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         alpha, beta = draw_values([self.alpha, self.beta],
-                                  point=point)
+                                  point=point, size=size)
         return generate_samples(self._random, alpha, beta,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Cauchy distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         alpha = self.alpha
         beta = self.beta
         return bound(- tt.log(np.pi) - tt.log(beta)
@@ -1223,6 +2109,11 @@ class Cauchy(Continuous):
         return r'${} \sim \text{{Cauchy}}(\mathit{{alpha}}={},~\mathit{{beta}}={})$'.format(name,
                                                                 get_variable_name(alpha),
                                                                 get_variable_name(beta))
+
+    def logcdf(self, value):
+        return tt.log(
+            0.5 + tt.arctan((value - self.alpha) / self.beta) / np.pi
+        )
 
 
 class HalfCauchy(PositiveContinuous):
@@ -1251,7 +2142,7 @@ class HalfCauchy(PositiveContinuous):
         plt.show()
 
     ========  ========================
-    Support   :math:`x \in \mathbb{R}`
+    Support   :math:`x \in [0, \infty)`
     Mode      0
     Mean      undefined
     Variance  undefined
@@ -1276,12 +2167,41 @@ class HalfCauchy(PositiveContinuous):
         return beta * np.abs(np.tan(np.pi * (u - 0.5)))
 
     def random(self, point=None, size=None):
-        beta = draw_values([self.beta], point=point)[0]
+        """
+        Draw random values from HalfCauchy distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        beta = draw_values([self.beta], point=point, size=size)[0]
         return generate_samples(self._random, beta,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of HalfCauchy distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         beta = self.beta
         return bound(tt.log(2) - tt.log(np.pi) - tt.log(beta)
                      - tt.log1p((value / beta)**2),
@@ -1294,6 +2214,15 @@ class HalfCauchy(PositiveContinuous):
         name = r'\text{%s}' % name
         return r'${} \sim \text{{HalfCauchy}}(\mathit{{beta}}={})$'.format(name,
                                                                 get_variable_name(beta))
+
+    def logcdf(self, value):
+        return tt.switch(
+            tt.le(value, 0),
+            -np.inf,
+            tt.log(
+                2 * tt.arctan(value / self.beta) / np.pi
+            ))
+
 
 class Gamma(PositiveContinuous):
     R"""
@@ -1380,13 +2309,42 @@ class Gamma(PositiveContinuous):
         return alpha, beta
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from Gamma distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         alpha, beta = draw_values([self.alpha, self.beta],
-                                  point=point)
+                                  point=point, size=size)
         return generate_samples(stats.gamma.rvs, alpha, scale=1. / beta,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Gamma distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         alpha = self.alpha
         beta = self.beta
         return bound(
@@ -1439,7 +2397,7 @@ class InverseGamma(PositiveContinuous):
     ========  ======================================================
     Support   :math:`x \in (0, \infty)`
     Mean      :math:`\dfrac{\beta}{\alpha-1}` for :math:`\alpha > 1`
-    Variance  :math:`\dfrac{\beta^2}{(\alpha-1)^2(\alpha)}`
+    Variance  :math:`\dfrac{\beta^2}{(\alpha-1)^2(\alpha - 2)}`
               for :math:`\alpha > 2`
     ========  ======================================================
 
@@ -1449,17 +2407,23 @@ class InverseGamma(PositiveContinuous):
         Shape parameter (alpha > 0).
     beta : float
         Scale parameter (beta > 0).
+    mu : float
+        Alternative shape parameter (mu > 0).
+    sd : float
+        Alternative scale parameter (sd > 0).
     """
 
-    def __init__(self, alpha, beta=1, *args, **kwargs):
+    def __init__(self, alpha=None, beta=None, mu=None, sd=None, *args, **kwargs):
         super(InverseGamma, self).__init__(*args, defaults=('mode',), **kwargs)
+
+        alpha, beta = InverseGamma._get_alpha_beta(alpha, beta, mu, sd)
         self.alpha = alpha = tt.as_tensor_variable(alpha)
         self.beta = beta = tt.as_tensor_variable(beta)
 
         self.mean = self._calculate_mean()
         self.mode = beta / (alpha + 1.)
         self.variance = tt.switch(tt.gt(alpha, 2),
-                                  (beta**2) / (alpha * (alpha - 1.)**2),
+                                  (beta**2) / ((alpha - 2) * (alpha - 1.)**2),
                                   np.inf)
         assert_negative_support(alpha, 'alpha', 'InverseGamma')
         assert_negative_support(beta, 'beta', 'InverseGamma')
@@ -1472,14 +2436,60 @@ class InverseGamma(PositiveContinuous):
             m[self.alpha <= 1] = np.inf
             return m
 
+    @staticmethod
+    def _get_alpha_beta(alpha, beta, mu, sd):
+        if (alpha is not None):
+            if (beta is not None):
+                pass
+            else:
+                beta = 1
+        elif (mu is not None) and (sd is not None):
+            alpha = (2 * sd**2 + mu**2)/sd**2
+            beta = mu * (mu**2 + sd**2) / sd**2
+        else:
+            raise ValueError('Incompatible parameterization. Either use '
+                             'alpha and (optionally) beta, or mu and sd to specify '
+                             'distribution.')
+
+        return alpha, beta
+
     def random(self, point=None, size=None):
+        """
+        Draw random values from InverseGamma distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         alpha, beta = draw_values([self.alpha, self.beta],
-                                  point=point)
+                                  point=point, size=size)
         return generate_samples(stats.invgamma.rvs, a=alpha, scale=beta,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of InverseGamma distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         alpha = self.alpha
         beta = self.beta
         return bound(logpow(beta, alpha) - gammaln(alpha) - beta / value
@@ -1546,7 +2556,7 @@ class ChiSquared(Gamma):
         nu = dist.nu
         name = r'\text{%s}' % name
         return r'${} \sim \Chi^2(\mathit{{nu}}={})$'.format(name,
-                                                                get_variable_name(nu))
+                                                            get_variable_name(nu))
 
 
 class Weibull(PositiveContinuous):
@@ -1601,16 +2611,32 @@ class Weibull(PositiveContinuous):
         self.median = beta * tt.exp(gammaln(tt.log(2)))**(1. / alpha)
         self.variance = (beta**2) * \
             tt.exp(gammaln(1 + 2. / alpha - self.mean**2))
-        self.mode = tt.switch(alpha >= 1, 
-                              beta * ((alpha - 1)/alpha) ** (1 / alpha), 
+        self.mode = tt.switch(alpha >= 1,
+                              beta * ((alpha - 1)/alpha) ** (1 / alpha),
                               0)  # Reference: https://en.wikipedia.org/wiki/Weibull_distribution
 
         assert_negative_support(alpha, 'alpha', 'Weibull')
         assert_negative_support(beta, 'beta', 'Weibull')
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from Weibull distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         alpha, beta = draw_values([self.alpha, self.beta],
-                                  point=point)
+                                  point=point, size=size)
 
         def _random(a, b, size=None):
             return b * (-np.log(np.random.uniform(size=size)))**(1 / a)
@@ -1620,6 +2646,19 @@ class Weibull(PositiveContinuous):
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Weibull distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         alpha = self.alpha
         beta = self.beta
         return bound(tt.log(alpha) - tt.log(beta)
@@ -1636,6 +2675,28 @@ class Weibull(PositiveContinuous):
         return r'${} \sim \text{{Weibull}}(\mathit{{alpha}}={},~\mathit{{beta}}={})$'.format(name,
                                                                 get_variable_name(alpha),
                                                                 get_variable_name(beta))
+
+    def logcdf(self, value):
+        '''
+        Compute the log CDF for the Weibull distribution
+
+        References
+        ----------
+        .. [Machler2012] Martin Mächler (2012).
+            "Accurately computing log(1-exp(-|a|)) Assessed by the Rmpfr
+            package"
+        '''
+        alpha = self.alpha
+        beta = self.beta
+        a = (value / beta)**alpha
+        return tt.switch(
+            tt.le(value, 0.0),
+            -np.inf,
+            tt.switch(
+                tt.le(a, tt.log(2.0)),
+                tt.log(-tt.expm1(-a)),
+                tt.log1p(-tt.exp(-a)))
+        )
 
 
 class HalfStudentT(PositiveContinuous):
@@ -1682,7 +2743,7 @@ class HalfStudentT(PositiveContinuous):
     lam : float
         Scale parameter (lam > 0). Converges to the precision as nu
         increases. (only required if sd is not specified)
-        
+
     Examples
     --------
     .. code-block:: python
@@ -1690,10 +2751,11 @@ class HalfStudentT(PositiveContinuous):
         # Only pass in one of lam or sd, but not both.
         with pm.Model():
             x = pm.HalfStudentT('x', sd=10, nu=10)
-     
+
         with pm.Model():
             x = pm.HalfStudentT('x', lam=4, nu=10)
     """
+
     def __init__(self, nu=1, sd=None, lam=None, *args, **kwargs):
         super(HalfStudentT, self).__init__(*args, **kwargs)
         self.mode = tt.as_tensor_variable(0)
@@ -1708,12 +2770,41 @@ class HalfStudentT(PositiveContinuous):
         assert_negative_support(nu, 'nu', 'HalfStudentT')
 
     def random(self, point=None, size=None):
-        nu, sd = draw_values([self.nu, self.sd], point=point)
+        """
+        Draw random values from HalfStudentT distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        nu, sd = draw_values([self.nu, self.sd], point=point, size=size)
         return np.abs(generate_samples(stats.t.rvs, nu, loc=0, scale=sd,
                                        dist_shape=self.shape,
                                        size=size))
 
     def logp(self, value):
+        """
+        Calculate log-probability of HalfStudentT distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         nu = self.nu
         sd = self.sd
         lam = self.lam
@@ -1812,8 +2903,24 @@ class ExGaussian(Continuous):
         assert_negative_support(nu, 'nu', 'ExGaussian')
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from ExGaussian distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         mu, sigma, nu = draw_values([self.mu, self.sigma, self.nu],
-                                    point=point)
+                                    point=point, size=size)
 
         def _random(mu, sigma, nu, size=None):
             return (np.random.normal(mu, sigma, size=size)
@@ -1824,6 +2931,19 @@ class ExGaussian(Continuous):
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of ExGaussian distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         mu = self.mu
         sigma = self.sigma
         nu = self.nu
@@ -1847,6 +2967,30 @@ class ExGaussian(Continuous):
                                                                 get_variable_name(mu),
                                                                 get_variable_name(sigma),
                                                                 get_variable_name(nu))
+
+    def logcdf(self, value):
+        """
+        Compute the log CDF for the ExGaussian distribution
+
+        References
+        ----------
+        .. [Rigby2005] R.A. Rigby (2005).
+           "Generalized additive models for location, scale and shape"
+           http://dx.doi.org/10.1111/j.1467-9876.2005.00510.x
+        """
+        mu = self.mu
+        sigma = self.sigma
+        sigma_2 = sigma**2
+        nu = self.nu
+        z = value - mu - sigma_2/nu
+        return tt.switch(
+            tt.gt(nu, 0.05 * sigma),
+            tt.log(std_cdf((value - mu)/sigma) -
+                   std_cdf(z/sigma) * tt.exp(
+                       ((mu + (sigma_2/nu))**2 -
+                        (mu**2) -
+                        2 * value * ((sigma_2)/nu))/(2 * sigma_2))),
+            normal_lcdf(mu, sigma, value))
 
 
 class VonMises(Continuous):
@@ -1904,13 +3048,42 @@ class VonMises(Continuous):
         assert_negative_support(kappa, 'kappa', 'VonMises')
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from VonMises distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         mu, kappa = draw_values([self.mu, self.kappa],
-                                point=point)
+                                point=point, size=size)
         return generate_samples(stats.vonmises.rvs, loc=mu, kappa=kappa,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of VonMises distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         mu = self.mu
         kappa = self.kappa
         return bound(kappa * tt.cos(mu - value) - (tt.log(2 * np.pi) + log_i0(kappa)),
@@ -1985,7 +3158,8 @@ class SkewNormal(Continuous):
     approaching plus/minus infinite we get a half-normal distribution.
 
     """
-    def __init__(self, mu=0.0, sd=None, tau=None, alpha=1,  *args, **kwargs):
+
+    def __init__(self, mu=0.0, sd=None, tau=None, alpha=1, *args, **kwargs):
         super(SkewNormal, self).__init__(*args, **kwargs)
         tau, sd = get_tau_sd(tau=tau, sd=sd)
         self.mu = mu = tt.as_tensor_variable(mu)
@@ -2001,23 +3175,52 @@ class SkewNormal(Continuous):
         assert_negative_support(sd, 'sd', 'SkewNormal')
 
     def random(self, point=None, size=None):
+        """
+        Draw random values from SkewNormal distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         mu, tau, _, alpha = draw_values(
-            [self.mu, self.tau, self.sd, self.alpha], point=point)
+            [self.mu, self.tau, self.sd, self.alpha], point=point, size=size)
         return generate_samples(stats.skewnorm.rvs,
                                 a=alpha, loc=mu, scale=tau**-0.5,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of SkewNormal distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         tau = self.tau
         sd = self.sd
         mu = self.mu
         alpha = self.alpha
         return bound(
             tt.log(1 +
-            tt.erf(((value - mu) * tt.sqrt(tau) * alpha) / tt.sqrt(2)))
+                   tt.erf(((value - mu) * tt.sqrt(tau) * alpha) / tt.sqrt(2)))
             + (-tau * (value - mu)**2
-            + tt.log(tau / np.pi / 2.)) / 2.,
+               + tt.log(tau / np.pi / 2.)) / 2.,
             tau > 0, sd > 0)
 
     def _repr_latex_(self, name=None, dist=None):
@@ -2033,7 +3236,7 @@ class SkewNormal(Continuous):
                                                                 get_variable_name(alpha))
 
 
-class Triangular(Continuous):
+class Triangular(BoundedContinuous):
     R"""
     Continuous Triangular log-likelihood
 
@@ -2057,13 +3260,15 @@ class Triangular(Continuous):
         plt.style.use('seaborn-darkgrid')
         x = np.linspace(-2, 10, 500)
         lowers = [0., -1, 2]
-        cs = [0.5, 0.5, 0.75]
-        uppers = [4., 2, 6]
-        for lower, c_, upper_ in zip(lowers, cs, uppers):
-            pdf = st.triang.pdf(x, loc=lower, c=c_, scale=upper_)
+        cs = [2., 0., 6.5]
+        uppers = [4., 1, 8]
+        for lower, c, upper in zip(lowers, cs, uppers):
+            scale = upper - lower
+            c_ = (c - lower) / scale
+            pdf = st.triang.pdf(x, loc=lower, c=c_, scale=scale)
             plt.plot(x, pdf, label='lower = {}, c = {}, upper = {}'.format(lower,
-                                                                           lower + upper_ * c_,
-                                                                           lower + upper_))
+                                                                           c,
+                                                                           upper))
         plt.xlabel('x', fontsize=12)
         plt.ylabel('f(x)', fontsize=12)
         plt.legend(loc=1)
@@ -2087,27 +3292,61 @@ class Triangular(Continuous):
 
     def __init__(self, lower=0, upper=1, c=0.5,
                  *args, **kwargs):
-        super(Triangular, self).__init__(*args, **kwargs)
-
-        self.median = self.mean = self.c = c  = tt.as_tensor_variable(c)
+        self.median = self.mean = self.c = c = tt.as_tensor_variable(c)
         self.lower = lower = tt.as_tensor_variable(lower)
         self.upper = upper = tt.as_tensor_variable(upper)
 
+        super(Triangular, self).__init__(lower=lower, upper=upper,
+                                         *args, **kwargs)
+
     def random(self, point=None, size=None):
+        """
+        Draw random values from Triangular distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         c, lower, upper = draw_values([self.c, self.lower, self.upper],
-                                      point=point)
-        return generate_samples(stats.triang.rvs, c=c-lower, loc=lower, scale=upper-lower,
+                                      point=point, size=size)
+        scale = upper - lower
+        c_ = (c - lower) / scale
+        return generate_samples(stats.triang.rvs, c=c_, loc=lower, scale=scale,
                                 size=size, dist_shape=self.shape, random_state=None)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Triangular distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         c = self.c
         lower = self.lower
         upper = self.upper
         return tt.switch(alltrue_elemwise([lower <= value, value < c]),
                          tt.log(2 * (value - lower) / ((upper - lower) * (c - lower))),
-                         tt.switch(tt.eq(value, c), tt.log(2 / (upper - lower)),
-                         tt.switch(alltrue_elemwise([c < value, value <= upper]),
-                         tt.log(2 * (upper - value) / ((upper - lower) * (upper - c))),np.inf)))
+                         tt.switch(tt.eq(value, c),
+                                   tt.log(2 / (upper - lower)),
+                                   tt.switch(alltrue_elemwise([c < value, value <= upper]),
+                                             tt.log(2 * (upper - value) / ((upper - lower) * (upper - c))),
+                                             np.inf)))
 
     def _repr_latex_(self, name=None, dist=None):
         if dist is None:
@@ -2121,6 +3360,24 @@ class Triangular(Continuous):
                                                                 get_variable_name(lower),
                                                                 get_variable_name(upper))
 
+    def logcdf(self, value):
+        l = self.lower
+        u = self.upper
+        c = self.c
+        return tt.switch(
+            tt.le(value, l),
+            -np.inf,
+            tt.switch(
+                tt.le(value, c),
+                tt.log(((value - l) ** 2) / ((u - l) * (c - l))),
+                tt.switch(
+                    tt.lt(value, u),
+                    tt.log1p(-((u - value) ** 2) / ((u - l) * (u - c))),
+                    0
+                )
+            )
+        )
+
 
 class Gumbel(Continuous):
     R"""
@@ -2130,7 +3387,13 @@ class Gumbel(Continuous):
 
     .. math::
 
-       f(x \mid \mu, \beta) = -\frac{x - \mu}{\beta} - \exp \left(-\frac{x - \mu}{\beta} \right) - \log(\beta)
+       f(x \mid \mu, \beta) = \frac{1}{\beta}e^{-(z + e^{-z})}
+
+    where
+
+    .. math::
+
+        z = \frac{x - \mu}{\beta}.
 
     .. plot::
 
@@ -2153,7 +3416,7 @@ class Gumbel(Continuous):
     ========  ==========================================
     Support   :math:`x \in \mathbb{R}`
     Mean      :math:`\mu + \beta\gamma`, where \gamma is the Euler-Mascheroni constant
-    Variance  :math:`\frac{\pi^2}{6} \beta^2)`
+    Variance  :math:`\frac{\pi^2}{6} \beta^2`
     ========  ==========================================
 
     Parameters
@@ -2178,12 +3441,41 @@ class Gumbel(Continuous):
         super(Gumbel, self).__init__(**kwargs)
 
     def random(self, point=None, size=None):
-        mu, sd = draw_values([self.mu, self.beta], point=point)
+        """
+        Draw random values from Gumbel distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        mu, sd = draw_values([self.mu, self.beta], point=point, size=size)
         return generate_samples(stats.gumbel_r.rvs, loc=mu, scale=sd,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Gumbel distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         scaled = (value - self.mu) / self.beta
         return bound(-scaled - tt.exp(-scaled) - tt.log(self.beta), self.beta > 0)
 
@@ -2196,6 +3488,124 @@ class Gumbel(Continuous):
         return r'${} \sim \text{{Gumbel}}(\mathit{{mu}}={},~\mathit{{beta}}={})$'.format(name,
                                                                 get_variable_name(mu),
                                                                 get_variable_name(beta))
+
+    def logcdf(self, value):
+        beta = self.beta
+        mu = self.mu
+
+        return -tt.exp(-(value - mu)/beta)
+
+
+class Rice(PositiveContinuous):
+    R"""
+    Rice distribution.
+
+    .. math::
+
+       f(x\mid \nu ,\sigma )=
+       {\frac  {x}{\sigma ^{2}}}\exp
+       \left({\frac  {-(x^{2}+\nu ^{2})}{2\sigma ^{2}}}\right)I_{0}\left({\frac  {x\nu }{\sigma ^{2}}}\right),
+
+    ========  ==============================================================
+    Support   :math:`x \in (0, \infty)`
+    Mean      :math:`\sigma {\sqrt  {\pi /2}}\,\,L_{{1/2}}(-\nu ^{2}/2\sigma ^{2})`
+    Variance  :math:`2\sigma ^{2}+\nu ^{2}-{\frac  {\pi \sigma ^{2}}{2}}L_{{1/2}}^{2}\left({\frac  {-\nu ^{2}}{2\sigma ^{2}}}\right)`
+    ========  ==============================================================
+
+
+    Parameters
+    ----------
+    nu : float
+        noncentrality parameter.
+    sd : float
+        scale parameter.
+    b : float
+        shape parameter (alternative to nu).
+
+    Notes
+    -----
+    The distribution :math:`\mathrm{Rice}\left(|\nu|,\sigma\right)` is the
+    distribution of :math:`R=\sqrt{X^2+Y^2}` where :math:`X\sim N(\nu \cos{\theta}, \sigma^2)`,
+    :math:`Y\sim N(\nu \sin{\theta}, \sigma^2)` are independent and for any
+    real :math:`\theta`.
+
+    The distribution is defined with either nu or b. 
+    The link between the two parametrizations is given by
+
+    .. math::
+
+       b = \dfrac{\nu}{\sigma}
+
+    """
+
+    def __init__(self, nu=None, sd=None, b=None, *args, **kwargs):
+        super(Rice, self).__init__(*args, **kwargs)
+        nu, b, sd = self.get_nu_b(nu, b, sd)
+        self.nu = nu = tt.as_tensor_variable(nu)
+        self.sd = sd = tt.as_tensor_variable(sd)
+        self.b = b = tt.as_tensor_variable(b)
+        self.mean = sd * np.sqrt(np.pi / 2) * tt.exp((-nu**2 / (2 * sd**2)) / 2) * ((1 - (-nu**2 / (2 * sd**2)))
+                                 * tt.i0(-(-nu**2 / (2 * sd**2)) / 2) - (-nu**2 / (2 * sd**2)) * tt.i1(-(-nu**2 / (2 * sd**2)) / 2))
+        self.variance = 2 * sd**2 + nu**2 - (np.pi * sd**2 / 2) * (tt.exp((-nu**2 / (2 * sd**2)) / 2) * ((1 - (-nu**2 / (
+            2 * sd**2))) * tt.i0(-(-nu**2 / (2 * sd**2)) / 2) - (-nu**2 / (2 * sd**2)) * tt.i1(-(-nu**2 / (2 * sd**2)) / 2)))**2
+
+    def get_nu_b(self, nu, b, sd):
+        if sd is None:
+            sd = 1.
+        if nu is None and b is not None:
+            nu = b * sd
+            return nu, b, sd
+        elif nu is not None and b is None:
+            b = nu / sd
+            return nu, b, sd
+        raise ValueError('Rice distribution must specify either nu'
+                         ' or b.')
+
+    def random(self, point=None, size=None):
+        """
+        Draw random values from Rice distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        nu, sd = draw_values([self.nu, self.sd],
+                             point=point, size=size)
+        return generate_samples(stats.rice.rvs, b=nu / sd, scale=sd, loc=0,
+                                dist_shape=self.shape, size=size)
+
+    def logp(self, value):
+        """
+        Calculate log-probability of Rice distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
+        nu = self.nu
+        sd = self.sd
+        b = self.b
+        x = value / sd
+        return bound(tt.log(x * tt.exp((-(x - b) * (x - b)) / 2) * i0e(x * b) / sd),
+                     sd >= 0,
+                     nu >= 0,
+                     value > 0,
+                     )
 
 
 class Logistic(Continuous):
@@ -2240,6 +3650,7 @@ class Logistic(Continuous):
     s : float
         Scale (s > 0).
     """
+
     def __init__(self, mu=0., s=1., *args, **kwargs):
         super(Logistic, self).__init__(*args, **kwargs)
 
@@ -2250,6 +3661,19 @@ class Logistic(Continuous):
         self.variance = s**2 * np.pi**2 / 3.
 
     def logp(self, value):
+        """
+        Calculate log-probability of Logistic distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         mu = self.mu
         s = self.s
 
@@ -2257,7 +3681,23 @@ class Logistic(Continuous):
             -(value - mu) / s - tt.log(s) - 2 * tt.log1p(tt.exp(-(value - mu) / s)), s > 0)
 
     def random(self, point=None, size=None):
-        mu, s = draw_values([self.mu, self.s], point=point)
+        """
+        Draw random values from Logistic distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        mu, s = draw_values([self.mu, self.s], point=point, size=size)
 
         return generate_samples(
             stats.logistic.rvs,
@@ -2274,6 +3714,30 @@ class Logistic(Continuous):
         return r'${} \sim \text{{Logistic}}(\mathit{{mu}}={},~\mathit{{s}}={})$'.format(name,
                                                                 get_variable_name(mu),
                                                                 get_variable_name(s))
+
+    def logcdf(self, value):
+        """
+        Compute the log CDF for the Logistic distribution
+
+        References
+        ----------
+        .. [Machler2012] Martin Mächler (2012).
+            "Accurately computing log(1-exp(-|a|)) Assessed by the Rmpfr
+            package"
+        """
+        mu = self.mu
+        s = self.s
+        a = -(value - mu)/s
+        return - tt.switch(
+            tt.le(a, -37),
+            tt.exp(a),
+            tt.switch(
+                tt.le(a, 18),
+                tt.log1p(tt.exp(a)),
+                tt.switch(
+                    tt.le(a, 33.3),
+                    tt.exp(-a) + a,
+                    a)))
 
 
 class LogitNormal(UnitContinuous):
@@ -2333,11 +3797,41 @@ class LogitNormal(UnitContinuous):
         super(LogitNormal, self).__init__(**kwargs)
 
     def random(self, point=None, size=None):
-        mu, _, sd = draw_values([self.mu, self.tau, self.sd], point=point)
+        """
+        Draw random values from LogitNormal distribution.
+
+        Parameters
+        ----------
+        point : dict, optional
+            Dict of variable values on which random values are to be
+            conditioned (uses default point if not specified).
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
+        mu, _, sd = draw_values(
+            [self.mu, self.tau, self.sd], point=point, size=size)
         return expit(generate_samples(stats.norm.rvs, loc=mu, scale=sd, dist_shape=self.shape,
                                       size=size))
 
     def logp(self, value):
+        """
+        Calculate log-probability of LogitNormal distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         sd = self.sd
         mu = self.mu
         tau = self.tau
@@ -2356,7 +3850,7 @@ class LogitNormal(UnitContinuous):
                                                                 get_variable_name(sd))
 
 
-class Interpolated(Continuous):
+class Interpolated(BoundedContinuous):
     R"""
     Univariate probability distribution defined as a linear interpolation
     of probability density function evaluated on some lattice of points.
@@ -2384,14 +3878,15 @@ class Interpolated(Continuous):
         Probability density function evaluated on lattice `x_points`
     """
 
-    def __init__(self, x_points, pdf_points, transform='interval',
-                 *args, **kwargs):
-        if transform == 'interval':
-            transform = transforms.interval(x_points[0], x_points[-1])
-        super(Interpolated, self).__init__(transform=transform,
+    def __init__(self, x_points, pdf_points, *args, **kwargs):
+        self.lower = lower = tt.as_tensor_variable(x_points[0])
+        self.upper = upper = tt.as_tensor_variable(x_points[-1])
+
+        super(Interpolated, self).__init__(lower=lower, upper=upper,
                                            *args, **kwargs)
 
-        interp = InterpolatedUnivariateSpline(x_points, pdf_points, k=1, ext='zeros')
+        interp = InterpolatedUnivariateSpline(
+            x_points, pdf_points, k=1, ext='zeros')
         Z = interp.integral(x_points[0], x_points[-1])
 
         self.Z = tt.as_tensor_variable(Z)
@@ -2423,10 +3918,36 @@ class Interpolated(Continuous):
     def _random(self, size=None):
         return self._argcdf(np.random.uniform(size=size))
 
-    def random(self, point=None, size=None):
+    def random(self, size=None):
+        """
+        Draw random values from Interpolated distribution.
+
+        Parameters
+        ----------
+        size : int, optional
+            Desired size of random sample (returns one sample if not
+            specified).
+
+        Returns
+        -------
+        array
+        """
         return generate_samples(self._random,
                                 dist_shape=self.shape,
                                 size=size)
 
     def logp(self, value):
+        """
+        Calculate log-probability of Interpolated distribution at specified value.
+
+        Parameters
+        ----------
+        value : numeric
+            Value(s) for which log-probability is calculated. If the log probabilities for multiple
+            values are desired the values must be provided in a numpy array or theano tensor
+
+        Returns
+        -------
+        TensorVariable
+        """
         return tt.log(self.interp_op(value) / self.Z)
